@@ -266,11 +266,11 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 3 {
         config.migrate_owner_locked_gestures();
     }
-    // v5 is the schema this change is part of, so every *released* schema —
-    // v4 and below — is what needs the rename. A file already declaring v5 was
-    // written by an unpublished build of this branch and is not something users
-    // have on disk.
-    if header.schema_version <= 4 {
+    // Upstream v5 introduced transport-independent device keys. The Spotlight
+    // preview branched before that migration and wrote schemas through v8 with
+    // transport-scoped direct keys, so every pre-v9 file gets the idempotent
+    // rewrite. Files already carrying canonical keys are unchanged.
+    if header.schema_version <= 8 {
         config.migrate_transport_scoped_keys();
     }
     // Every released schema may contain an explicit copy of the pre-v7

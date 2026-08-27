@@ -89,6 +89,38 @@ fn migrated_load_backs_up_the_pre_migration_source_exactly_once() {
 }
 
 #[test]
+fn spotlight_preview_v8_loads_and_migrates_its_transport_scoped_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let original = r#"schema_version = 8
+
+[devices."direct:046d:b503:unit:0bea56a1".presenter]
+effect = "Magnify"
+magnification = 2
+"#;
+    fs::write(&path, original).expect("write preview config");
+
+    let (config, mut file) = ConfigFile::load_from_path(&path).expect("load v8 config");
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
+    let device = config
+        .devices
+        .get("unit:0bea56a1")
+        .expect("preview device key is canonicalized");
+    assert_eq!(
+        device.presenter.effect,
+        crate::hid::PresenterEffect::Magnify
+    );
+    assert_eq!(device.presenter.magnification, 2);
+    assert!(device.links.contains_key("direct:046d:b503"));
+
+    file.save(&config).expect("save migrated config");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("config.toml.v8.bak")).expect("read v8 backup"),
+        original,
+    );
+}
+
+#[test]
 fn config_backups_rotate_between_generations() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");

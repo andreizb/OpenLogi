@@ -93,8 +93,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-/// v7 adds Spotlight presenter actions, visuals, timer, and per-app settings.
-pub const SCHEMA_VERSION: u32 = 7;
+/// v7 adds Spotlight presenter actions and the first visual controls. Preview
+/// builds extended that schema through v8 with the timer, per-effect controls,
+/// and per-app presenter settings. v9 reconciles those preview files with the
+/// transport-independent device keys introduced by upstream v5.
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
