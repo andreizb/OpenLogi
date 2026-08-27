@@ -4,7 +4,7 @@ use std::fmt;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use openlogi_hid::ReprogControlEntry;
+use openlogi_hid::{ReprogControlEntry, dump_reprog_controls_on};
 
 use crate::cmd::diag::select_device;
 
@@ -19,10 +19,10 @@ pub struct ControlsArgs {
 
 pub async fn run(args: ControlsArgs) -> Result<()> {
     // 0x1b04 = ReprogControlsV4 — the source of divertable HID++ button CIDs.
-    let (route, name) = select_device(args.device.as_deref(), &[0x1b04]).await?;
+    let (route, name, channel) = select_device(args.device.as_deref(), &[0x1b04]).await?;
     println!("device: {name} ({route})");
 
-    let controls = openlogi_hid::dump_reprog_controls(&route)
+    let controls = dump_reprog_controls_on(&channel)
         .await
         .context("dump HID++ 0x1b04 reprogrammable controls")?;
     if controls.is_empty() {

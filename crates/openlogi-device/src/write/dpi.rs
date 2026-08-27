@@ -195,6 +195,11 @@ pub async fn get_dpi(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<Dp
     .await
 }
 
+/// Read the current DPI on an already-open channel.
+pub async fn get_dpi_on(shared: &SharedChannel) -> Result<Dpi, WriteError> {
+    get_dpi_on_channel(shared.channel(), shared.device_index()).await
+}
+
 async fn get_dpi_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,

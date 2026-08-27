@@ -20,6 +20,7 @@ openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-ui = { path = "../openlogi-ui" }
 anyhow = { workspace = true }
+chrono = "0.4"
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 rust-i18n = "4"
@@ -36,6 +37,7 @@ embed-resource = "3.0.9"
 # display needs global display bounds, which GPUI's display API doesn't expose
 # (its bounds are display-relative). C FFI, so core-graphics.
 core-graphics = { workspace = true }
+image = { version = "0.25", default-features = false }
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "block2"] }
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).

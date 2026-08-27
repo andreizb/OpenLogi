@@ -7,8 +7,8 @@ use std::sync::{LazyLock, Mutex};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 
 use openlogi_core::binding::{
@@ -71,6 +71,36 @@ pub(super) fn execute(action: &Action) {
             );
         }
     }
+}
+
+/// Recenter the pointer on the primary Windows display.
+pub(super) fn recenter_pointer() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SetCursorPos};
+    // SAFETY: both calls are pure Win32 coordinate queries/updates and accept
+    // any screen coordinate pair.
+    unsafe {
+        let width = GetSystemMetrics(0);
+        let height = GetSystemMetrics(1);
+        let _ = SetCursorPos(width / 2, height / 2);
+    }
+}
+
+/// Apply one relative presenter-motion sample. Relative `SendInput` movement
+/// is resolved by Windows from the cursor's current clamped position.
+pub(super) fn move_pointer_by(dx: i32, dy: i32) {
+    send_inputs(&[INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }]);
 }
 
 /// The Windows chord for a named [`Shortcut`], or the raw virtual key to

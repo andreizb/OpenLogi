@@ -16,7 +16,9 @@ devenv shell -- cargo run -p xtask -- <command>
 - `macos icon` — compile `design/icon/openlogi.icon` into the `AppIcon.icns` and
   `Assets.car` under `crates/openlogi-desktop/icon/`.
 - `macos bundle [--channel dev|production]` — build `OpenLogi.app` and embed the
-  agent and overlay helpers.
+  agent and overlay helpers. Local builds use `OPENLOGI_LOCAL_CODESIGN_IDENTITY`
+  or the first Apple Development identity in the keychain so macOS permission
+  grants survive rebuilds.
 - `macos dev-bundle --binary <path>` — wrap a freshly built desktop binary in
   `target/dev/OpenLogi.app`. Driven by the Cargo runner, not run by hand.
 - `macos dmg` — package an existing app bundle into the branded DMG.

@@ -12,9 +12,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
-use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for, presenter_bindings_for,
+};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::hid::PresenterSettings;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
@@ -61,6 +64,8 @@ pub struct DispatchPlan {
     /// macOS Back/Forward gesture maps resolved from device-owned HID++ raw XY.
     /// These remain available while an old diversion is draining.
     pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Effective per-device/per-application presenter settings.
+    pub presenter_settings: PresenterSettings,
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
@@ -101,12 +106,20 @@ pub fn plan_for_device(
     config: &Config,
     physical_key: PhysicalDeviceKey,
     config_key: &str,
+    presenter_controls: bool,
     route: DeviceRoute,
     app: Option<&str>,
     rearm_generation: u64,
     os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
-    let bindings = button_bindings_for(config, Some(config_key), app);
+    let mut bindings = button_bindings_for(config, Some(config_key), app);
+    let presenter_bindings = if presenter_controls {
+        presenter_bindings_for(config, Some(config_key), app)
+    } else {
+        BTreeMap::new()
+    };
+    let divert_presenter_buttons = presenter_bindings.keys().copied().collect();
+    bindings.extend(presenter_bindings);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. macOS Back/Forward are the exception below: HID++ owns their
     // button and motion reports because Bluetooth-direct CGEvents may be
@@ -192,6 +205,7 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                divert_presenter_buttons,
             },
             rearm_generation,
         },
@@ -200,6 +214,7 @@ pub fn plan_for_device(
             bindings,
             gesture_bindings,
             side_gesture_bindings,
+            presenter_settings: config.effective_presenter(config_key, app),
             thumbwheel_sensitivity,
         },
     }
@@ -232,6 +247,7 @@ mod tests {
             PhysicalDeviceKey::parse("receiver:cafe:slot:2")
                 .expect("fixture should be a physical key"),
             config_key,
+            false,
             route,
             app,
             rearm_generation,

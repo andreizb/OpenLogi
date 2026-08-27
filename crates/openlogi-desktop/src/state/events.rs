@@ -37,6 +37,8 @@ pub(crate) enum StateEvent {
     DpiChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
+    /// Spotlight settings, pointer-speed data, or presenter bindings changed.
+    PresenterChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.

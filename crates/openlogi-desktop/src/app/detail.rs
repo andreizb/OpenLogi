@@ -32,8 +32,10 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::features::presenter::PresenterControlsView;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
+    presenter_profile_scope_bar,
 };
 use crate::state::{AppState, DeviceRecord, StateEvents};
 use crate::ui::battery::BatteryIndicator;
@@ -94,6 +96,7 @@ pub(super) struct DetailPanels<'a> {
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub presenter_panel: &'a gpui::Entity<PresenterControlsView>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -118,6 +121,9 @@ pub(super) fn detail_content(
     let content = match active {
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
+        }
+        DetailTab::Presenter => {
+            presenter_tab(panels.presenter_panel, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::ActionsRing => {
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
@@ -240,6 +246,7 @@ fn detail_navigation(
 fn detail_tab_icon(tab: DetailTab) -> &'static str {
     match tab {
         DetailTab::Buttons => "action-icons/mouse-pointer-click.svg",
+        DetailTab::Presenter => "action-icons/star.svg",
         DetailTab::ActionsRing => "action-icons/layout-grid.svg",
         DetailTab::Keys => "action-icons/keyboard.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
@@ -263,6 +270,22 @@ fn buttons_tab(
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
+}
+
+/// Spotlight controls share the same installed-app profile picker as button
+/// bindings, so display names, icons, adding, and removal stay consistent.
+fn presenter_tab(
+    presenter: &gpui::Entity<PresenterControlsView>,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .children(presenter_profile_scope_bar(profile_icons, app_catalog, cx))
+        .child(tab_body(ContentWidth::DoubleExtraLarge, presenter.clone()))
 }
 
 fn tab_body(

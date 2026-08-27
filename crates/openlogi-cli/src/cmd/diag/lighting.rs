@@ -4,7 +4,7 @@
 use anyhow::Result;
 use clap::{Args, ValueEnum};
 use openlogi_core::color::Rgb;
-use openlogi_hid::LightingMethod;
+use openlogi_hid::{LightingMethod, set_keyboard_color_with_on};
 
 use super::select_device;
 
@@ -52,11 +52,12 @@ pub async fn run(args: LightingArgs) -> Result<()> {
     let color: Rgb = args.color.trim_start_matches('#').parse()?;
     let (r, g, b) = color.components();
 
-    let (route, name) = select_device(args.device.as_deref(), LIGHTING_FEATURES).await?;
+    let (route, name, channel) =
+        select_device(args.device.as_deref(), LIGHTING_FEATURES).await?;
 
     let method: LightingMethod = args.method.into();
     println!("setting {name} ({route}) to #{r:02x}{g:02x}{b:02x} via {method:?}");
-    openlogi_hid::set_keyboard_color_with(&route, method, r, g, b).await?;
+    set_keyboard_color_with_on(&channel, method, r, g, b).await?;
     println!("done — {name} should now be solid #{r:02x}{g:02x}{b:02x}");
     Ok(())
 }

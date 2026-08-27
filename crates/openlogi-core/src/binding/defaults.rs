@@ -26,6 +26,10 @@ use super::value::Binding;
 /// two settings that divert the wheel over `0x2150` in the first place. A tap
 /// bound explicitly in the config still dispatches; only the seed is inert.
 #[must_use]
+#[expect(
+    clippy::match_same_arms,
+    reason = "keyboard controls and native presenter navigation intentionally share the inert default"
+)]
 pub fn default_binding(button: ButtonId) -> Action {
     match button {
         ButtonId::LeftClick => Action::LeftClick,
@@ -83,6 +87,14 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
         | ButtonId::KeyVolumeUp => Action::None,
+        // Presenter controls are diverted and re-injected so the pointer can
+        // form Next/Back cycling chords without changing normal slide taps.
+        ButtonId::PresenterCursor => Action::PresenterPointer,
+        ButtonId::PresenterHighlight => Action::PresenterHighlight,
+        ButtonId::PresenterNext => Action::PresenterNext,
+        ButtonId::PresenterNextHold => Action::PresenterStartPresentation,
+        ButtonId::PresenterBack => Action::PresenterBack,
+        ButtonId::PresenterBackHold => Action::PresenterBlankScreen,
     }
 }
 

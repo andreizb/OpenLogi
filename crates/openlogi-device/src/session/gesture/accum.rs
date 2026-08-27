@@ -64,6 +64,8 @@ pub(super) struct CaptureAccum {
     dpi_down: bool,
     /// Diverted standard-button CIDs held in the last event.
     buttons_down: Vec<u16>,
+    /// Presenter control that owns otherwise-unattributed raw-XY reports.
+    presenter_source: Option<(u16, ButtonId)>,
 }
 
 #[cfg(test)]
@@ -210,6 +212,16 @@ impl CaptureAccum {
                         self.buttons_down.retain(|&c| c != cid);
                     }
                 }
+
+                // A presenter control diverted as a plain button never opens a
+                // gesture hold, so its raw-XY reports would otherwise be stray.
+                // Remember the held one so motion can be attributed to it.
+                self.presenter_source = button_cids
+                    .iter()
+                    .find(|(cid, button)| {
+                        cids.contains(cid) && presenter_button_needs_raw_xy(*button)
+                    })
+                    .copied();
             }
             RawControlEvent::RawXy { dx, dy } => {
                 self.on_raw_xy(dx, dy, sink);
@@ -228,6 +240,9 @@ impl CaptureAccum {
             ..
         } = &mut self.hold
         else {
+            if let Some((_, button)) = self.presenter_source {
+                let _ = sink.send(CapturedInput::PresenterMotion { button, dx, dy });
+            }
             return;
         };
         // While two armed sources are held the report could belong to either

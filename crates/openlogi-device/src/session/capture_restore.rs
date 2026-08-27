@@ -61,6 +61,7 @@ pub(crate) struct ArmedReporting {
 pub(crate) struct ReprogRestore {
     feature_index: u8,
     controls: Vec<ArmedReporting>,
+    undivert_cids: Vec<u16>,
 }
 
 impl ReprogRestore {
@@ -68,6 +69,19 @@ impl ReprogRestore {
         (!controls.is_empty()).then_some(Self {
             feature_index,
             controls,
+            undivert_cids: Vec::new(),
+        })
+    }
+
+    pub(crate) fn with_undivert_cids(
+        feature_index: u8,
+        controls: Vec<ArmedReporting>,
+        undivert_cids: Vec<u16>,
+    ) -> Option<Self> {
+        (!controls.is_empty() || !undivert_cids.is_empty()).then_some(Self {
+            feature_index,
+            controls,
+            undivert_cids,
         })
     }
 }
@@ -94,10 +108,9 @@ impl fmt::Debug for CaptureRestorePlan {
         f.debug_struct("CaptureRestorePlan")
             .field(
                 "reporting_count",
-                &self
-                    .reprog
-                    .as_ref()
-                    .map_or(0, |reprog| reprog.controls.len()),
+                &self.reprog.as_ref().map_or(0, |reprog| {
+                    reprog.controls.len() + reprog.undivert_cids.len()
+                }),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
             .finish()
@@ -114,6 +127,10 @@ impl RestorePlan for CaptureRestorePlan {
                 ReprogControlsV4::new(channel.clone(), device_index, reprog.feature_index);
             for &reporting in &reprog.controls {
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
+            }
+            for &cid in &reprog.undivert_cids {
+                restored &=
+                    restore_result(controls.undivert_cid(cid).await, "presenter hold control");
             }
         }
         if let Some(feature_index) = self.thumb_index {

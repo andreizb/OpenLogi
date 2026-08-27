@@ -51,6 +51,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     PairedDevice, StandaloneDevice,
 };
+use openlogi_core::hid::{PointerSpeed, PresenterSettings};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -62,7 +63,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
     MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    PairingPhase, PairingUpdate, PresenterObservation, RingObservation,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -620,6 +621,7 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
     }
 }
 
+
 /// `launch_at_login` mirrors the config file so the Settings toggle round-trips
 /// (the GUI saves config.toml, calls `reload_config`, then expects the next
 /// snapshot to agree). Everything else is scripted green.
@@ -827,6 +829,46 @@ impl Agent for MockAgent {
     ) -> Result<BacklightState, WriteError> {
         let state = self.state.lock().await;
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
+    }
+
+    async fn read_pointer_speed(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2205,
+        })
+    }
+
+    async fn set_pointer_speed(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+        _speed: PointerSpeed,
+    ) -> Result<(), WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2205,
+        })
+    }
+
+    async fn observe_presenter(self, _: Context, _since: Generation) -> PresenterObservation {
+        tokio::time::sleep(OBSERVE_HOLD).await;
+        PresenterObservation {
+            generation: 1,
+            overlay: None,
+        }
+    }
+
+    async fn set_presenter_settings(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+        _settings: PresenterSettings,
+    ) -> Result<(), WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1a00,
+        })
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

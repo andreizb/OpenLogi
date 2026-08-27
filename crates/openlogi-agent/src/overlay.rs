@@ -39,11 +39,7 @@ pub fn spawn() {
     let result = std::thread::Builder::new()
         .name("openlogi-overlay-supervisor".into())
         .spawn(move || {
-            let mut spawn = move || {
-                Command::new(&binary)
-                    .env(RUN_ENV, mine.get().to_string())
-                    .spawn()
-            };
+            let mut spawn = move || overlay_command(&binary, mine).spawn();
             // The anonymous verdict repeats every poll for as long as the
             // tenant lives, and answering it walks the process table. Answer
             // once per spell of anonymity and stay quiet until the role
@@ -62,6 +58,35 @@ pub fn spawn() {
     if let Err(error) = result {
         warn!(%error, "could not start the Actions Ring overlay supervisor");
     }
+}
+
+/// Build the process command that gives the overlay its own macOS TCC
+/// responsibility. `open -W` remains alive for the lifetime of the launched
+/// helper, so the existing supervisor still observes a meaningful child.
+fn overlay_command(binary: &Path, mine: Run) -> Command {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = helper_bundle(binary) {
+        let mut command = Command::new("/usr/bin/open");
+        command
+            .arg("-W")
+            .arg("-g")
+            .arg("-n")
+            .arg("--env")
+            .arg(format!("{RUN_ENV}={}", mine.get()))
+            .arg(bundle);
+        return command;
+    }
+
+    let mut command = Command::new(binary);
+    command.env(RUN_ENV, mine.get().to_string());
+    command
+}
+
+/// The `.app` root of a packaged overlay binary.
+#[cfg(target_os = "macos")]
+fn helper_bundle(path: &Path) -> Option<&Path> {
+    let bundle = path.ancestors().nth(3)?;
+    (bundle.extension()? == "app").then_some(bundle)
 }
 
 /// Ask the overlay to leave, on the way out of a deliberate agent shutdown.
@@ -214,6 +239,20 @@ mod tests {
             Path::new(
                 "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"
             )
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn packaged_overlay_resolves_to_its_own_bundle() {
+        let binary = Path::new(
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay",
+        );
+        assert_eq!(
+            helper_bundle(binary),
+            Some(Path::new(
+                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Overlay.app"
+            ))
         );
     }
 }

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, SmartShiftStatus};
+use openlogi_core::hid::{DpiInfo, PointerSpeed, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
@@ -32,3 +32,7 @@ pub type DpiLoad = Load<Arc<DpiInfo>>;
 /// stores wheel mode / threshold / torque in its own non-volatile memory, so the
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
+
+/// Per-device Spotlight pointer-speed (`0x2205`) load state. The value lives
+/// on the presenter and is therefore queried instead of persisted in TOML.
+pub type PointerSpeedLoad = Load<Arc<PointerSpeed>>;

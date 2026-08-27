@@ -14,11 +14,13 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    PointerSpeed, PresenterEffect, PresenterSettings, ReceiverSelector, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -63,7 +65,9 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: Spotlight capabilities, pointer speed, settings and overlay state
+///      appended.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -410,6 +414,44 @@ pub struct RingObservation {
     pub invocation: Option<ActionRingInvocation>,
 }
 
+/// One active host-rendered Spotlight effect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenterOverlay {
+    /// Effect to paint around the pointer.
+    pub effect: PresenterEffect,
+    /// Remaining countdown duration, when a timer is running.
+    pub timer_remaining_ms: Option<u32>,
+    /// Show the local wall-clock time instead of a countdown.
+    pub timer_current_time: bool,
+    /// Relative effect size percentage.
+    pub effect_size: u8,
+    /// Relative effect contrast percentage.
+    pub effect_contrast: u8,
+    /// Laser or effect colour.
+    pub effect_color: Rgb,
+    /// Magnifier rim colour.
+    pub magnifier_color: Rgb,
+    /// Frozen global screen position; otherwise the effect follows the cursor.
+    pub frozen_position: Option<(i32, i32)>,
+    /// Whether the native cursor stays available while an effect is active.
+    pub cursor_control: bool,
+    /// Spotlight clear-area radius in screen points.
+    pub spotlight_radius: u16,
+    /// Magnifier lens radius in screen points.
+    pub magnifier_radius: u16,
+    /// Magnification percentage.
+    pub magnification: u16,
+}
+
+/// Level-triggered presenter overlay state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenterObservation {
+    /// Monotonic state generation, local to the agent run.
+    pub generation: Generation,
+    /// Active effect, or `None` when the overlay should close.
+    pub overlay: Option<PresenterOverlay>,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -566,4 +608,15 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Read the ten-level hardware pointer speed exposed by Spotlight.
+    async fn read_pointer_speed(route: DeviceRoute) -> Result<PointerSpeed, WriteError>;
+    /// Write Spotlight's ten-level hardware pointer speed.
+    async fn set_pointer_speed(route: DeviceRoute, speed: PointerSpeed) -> Result<(), WriteError>;
+    /// Block until the host-rendered Spotlight overlay changes.
+    async fn observe_presenter(since: Generation) -> PresenterObservation;
+    /// Apply host-side Spotlight settings to the active presenter.
+    async fn set_presenter_settings(
+        route: DeviceRoute,
+        settings: PresenterSettings,
+    ) -> Result<(), WriteError>;
 }

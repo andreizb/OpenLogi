@@ -77,6 +77,18 @@ pub enum ButtonId {
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
     WheelTiltRight,
+    /// The Spotlight presenter cursor / highlight button.
+    PresenterCursor,
+    /// The Spotlight presenter control that cycles the pointer effect.
+    PresenterHighlight,
+    /// Advance one slide on a presenter.
+    PresenterNext,
+    /// Long-press variant of [`ButtonId::PresenterNext`].
+    PresenterNextHold,
+    /// Go back one slide on a presenter.
+    PresenterBack,
+    /// Long-press variant of [`ButtonId::PresenterBack`].
+    PresenterBackHold,
 }
 
 impl ButtonId {
@@ -113,6 +125,16 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+    ];
+
+    /// The six physical/logical controls exposed by Spotlight presenters.
+    pub const PRESENTER_BUTTONS: [ButtonId; 6] = [
+        ButtonId::PresenterCursor,
+        ButtonId::PresenterHighlight,
+        ButtonId::PresenterNext,
+        ButtonId::PresenterNextHold,
+        ButtonId::PresenterBack,
+        ButtonId::PresenterBackHold,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -162,6 +184,12 @@ impl ButtonId {
         self.is_os_hook_gesture_source() || self.is_hidpp_gesture_source()
     }
 
+    /// Whether this is a logical control on a presentation remote.
+    #[must_use]
+    pub fn is_presenter_button(self) -> bool {
+        Self::PRESENTER_BUTTONS.contains(&self)
+    }
+
     /// Human-readable label for popovers and tooltips.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -188,6 +216,12 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::PresenterCursor => "Cursor Button",
+            ButtonId::PresenterHighlight => "Highlight Button",
+            ButtonId::PresenterNext => "Next Button",
+            ButtonId::PresenterNextHold => "Next Button (Hold)",
+            ButtonId::PresenterBack => "Back Button",
+            ButtonId::PresenterBackHold => "Back Button (Hold)",
         }
     }
 

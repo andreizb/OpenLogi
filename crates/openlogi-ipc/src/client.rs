@@ -34,7 +34,7 @@ use tarpc::context::{self, Context};
 
 use crate::{
     AgentClient, ClientKind, Generation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
-    RingObservation, transport,
+    PresenterObservation, RingObservation, transport,
 };
 
 /// Why a client could not be established.
@@ -215,6 +215,12 @@ impl Stamped for RingObservation {
     }
 }
 
+impl Stamped for PresenterObservation {
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
 /// One connection's view of the agent's generation counter.
 ///
 /// Starts at 0 — "I have seen nothing" — so the first answer is the agent's
@@ -306,6 +312,18 @@ impl Observer<RingObservation> {
         Self::new(client, |client, since| {
             let client = client.clone();
             Box::pin(async move { client.observe_action_ring(observe_context(), since).await })
+        })
+    }
+}
+
+impl Observer<PresenterObservation> {
+    /// Observe the Spotlight effect the overlay should be rendering over
+    /// `client`.
+    #[must_use]
+    pub fn presenter(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe_presenter(observe_context(), since).await })
         })
     }
 }

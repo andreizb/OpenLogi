@@ -34,7 +34,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
-/// v3 adds event-capable feature indexes discovered by the immutable walk.
+/// v3 adds event-capable feature indexes and `Capabilities::presenter_controls`,
+/// both of which must be freshly probed rather than inferred from an older cache.
 const SCHEMA_VERSION: u32 = 3;
 
 impl ProbeCacheError {

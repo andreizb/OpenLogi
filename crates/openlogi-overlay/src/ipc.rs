@@ -16,8 +16,10 @@ use std::{
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::client::{self, ConnectError, Observer};
-use openlogi_ipc::{ActionRingInvocation, AgentClient, ClientKind, RingObservation};
+use openlogi_ipc::client::{self, ConnectError, Observer, Stamped};
+use openlogi_ipc::{
+    ActionRingInvocation, AgentClient, ClientKind, PresenterObservation, RingObservation,
+};
 use succession::Standing;
 use tarpc::context;
 use tokio::sync::mpsc;
@@ -52,6 +54,10 @@ pub(crate) struct Handle {
     /// `None` is no ring — including a dismissal, which is why there is no
     /// separate "close" message to recognise.
     pub(crate) invocations: mpsc::UnboundedReceiver<Option<ActionRingInvocation>>,
+    /// The presenter effect the agent says should be visible. This is a
+    /// separate level-triggered channel because presenter animation must not
+    /// wake on unrelated Actions Ring changes.
+    pub(crate) presenter: mpsc::UnboundedReceiver<PresenterObservation>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
@@ -60,11 +66,13 @@ pub(crate) struct Handle {
 /// reconnects) on its own.
 pub(crate) fn spawn() -> Handle {
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
+    let (presenter_tx, presenter) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
                 observe_invocations(invocation_tx),
+                observe_presenter(presenter_tx),
                 send_commands(&mut command_rx)
             );
         });
@@ -74,6 +82,7 @@ pub(crate) fn spawn() -> Handle {
     }
     Handle {
         invocations,
+        presenter,
         commands,
     }
 }
@@ -128,18 +137,18 @@ const GIVE_UP_AFTER: Duration = Duration::from_mins(1);
 /// How long to wait between attempts to reach an agent.
 const RETRY_PERIOD: Duration = Duration::from_secs(1);
 
-/// The connection that carries invocations: its phase, and the state
+/// The connection that carries one observed channel: its phase, and the state
 /// meaningful within each phase.
 ///
 /// A successful connection owns its [`Observer`], and with it the generation
 /// cursor; a reconnect episode owns its give-up clock. Transitioning between
 /// them resets the fact from the previous phase by construction.
-enum InvocationLink {
+enum ObserveLink<T: Stamped> {
     Reconnecting { unreachable_since: Option<Instant> },
-    Observing(Observer<RingObservation>),
+    Observing(Observer<T>),
 }
 
-impl Default for InvocationLink {
+impl<T: Stamped> Default for ObserveLink<T> {
     fn default() -> Self {
         Self::Reconnecting {
             unreachable_since: None,
@@ -147,9 +156,9 @@ impl Default for InvocationLink {
     }
 }
 
-impl InvocationLink {
-    fn connected(&mut self, client: AgentClient) {
-        *self = Self::Observing(Observer::action_ring(client));
+impl<T: Stamped> ObserveLink<T> {
+    fn connected(&mut self, observer: Observer<T>) {
+        *self = Self::Observing(observer);
     }
 
     fn connect_failed(&mut self, now: Instant) -> bool {
@@ -167,16 +176,23 @@ impl InvocationLink {
     }
 }
 
-async fn observe_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
-    let mut link = InvocationLink::default();
+/// Follow one of the agent's level-triggered channels, reconnecting for as
+/// long as an agent might still answer, and handing each fresh answer to `tx`.
+async fn observe<T: Stamped, M>(
+    open: fn(AgentClient) -> Observer<T>,
+    message: impl Fn(T) -> M,
+    tx: mpsc::UnboundedSender<M>,
+    channel: &'static str,
+) {
+    let mut link = ObserveLink::default();
     loop {
-        if matches!(&link, InvocationLink::Reconnecting { .. }) {
+        if matches!(&link, ObserveLink::Reconnecting { .. }) {
             if let Some(client) = connect().await {
                 // Generation 0 says "I have seen nothing", so the first
                 // answer is whatever is showing right now. A replacement
                 // agent numbers its own generations, so every connection
                 // starts there independently.
-                link.connected(client);
+                link.connected(open(client));
             } else {
                 if link.connect_failed(Instant::now()) {
                     stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
@@ -185,21 +201,72 @@ async fn observe_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocati
                 continue;
             }
         }
-        let InvocationLink::Observing(observer) = &mut link else {
+        let ObserveLink::Observing(observer) = &mut link else {
             continue;
         };
         match observer.next().await {
             // The hold elapsing with nothing new, or a stale reply: still
             // alive, nothing to show.
             Ok(None) => {}
-            Ok(Some(ring)) => {
-                if tx.send(ring.invocation).is_err() {
+            Ok(Some(answer)) => {
+                if tx.send(message(answer)).is_err() {
                     return;
                 }
             }
             Err(error) => {
-                debug!(?error, "Actions Ring state channel disconnected");
+                debug!(?error, channel, "state channel disconnected");
                 link.disconnected();
+            }
+        }
+    }
+}
+
+async fn observe_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
+    observe(
+        Observer::action_ring,
+        |ring: RingObservation| ring.invocation,
+        tx,
+        "Actions Ring",
+    )
+    .await;
+}
+
+async fn observe_presenter(tx: mpsc::UnboundedSender<PresenterObservation>) {
+    observe(Observer::presenter, |observed| observed, tx, "presenter").await;
+}
+
+async fn poll_presenter(tx: mpsc::UnboundedSender<PresenterObservation>) {
+    let mut client = None;
+    let mut seen: Generation = 0;
+    let mut unreachable_since: Option<Instant> = None;
+    loop {
+        if client.is_none() {
+            client = connect().await;
+            seen = 0;
+        }
+        let Some(active) = client.as_ref() else {
+            if give_up(&mut unreachable_since, Instant::now()) {
+                stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
+            }
+            tokio::time::sleep(RETRY_PERIOD).await;
+            continue;
+        };
+        unreachable_since = None;
+        let mut ctx = context::current();
+        ctx.deadline = std::time::Instant::now() + OBSERVE_HOLD + Duration::from_secs(5);
+        match active.observe_presenter(ctx, seen).await {
+            Ok(observed) => {
+                if observed.generation == seen {
+                    continue;
+                }
+                seen = observed.generation;
+                if tx.send(observed).is_err() {
+                    return;
+                }
+            }
+            Err(error) => {
+                debug!(?error, "presenter state channel disconnected");
+                client = None;
             }
         }
     }

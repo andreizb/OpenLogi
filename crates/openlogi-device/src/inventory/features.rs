@@ -11,7 +11,7 @@ use hidpp::{
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
         gestures2::Gestures2Feature,
-        reprog_controls::{ReprogControlsFeature, control_ids},
+        reprog_controls::{ReprogControlsFeature, TaskId, control_ids, task_ids},
         unified_battery::UnifiedBatteryFeature,
     },
 };
@@ -338,34 +338,78 @@ async fn probe_extra_capabilities(
         caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
     }
     if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
-        let count = feature.get_count().await.map_err(|_| ())?;
-        let mut haptic_panel = false;
-        let mut dpi_gestures = false;
-        for index in 0..count {
-            let info = feature.get_cid_info(index).await.map_err(|_| ())?;
-            haptic_panel |= probe_haptic_controls
-                && info.cid == control_ids::HAPTIC_PANEL
-                && info.flags.is_divertable();
-            dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
-                && info.flags.is_divertable()
-                && info.flags.supports_raw_xy();
-        }
+        let Some(found) = reprog_control_capabilities(&feature, probe_haptic_controls).await else {
+            return Err(());
+        };
         // Publish only a complete control walk. A lost reply must retain the
         // cache's last-good capabilities and schedule repair, not hide support.
-        caps.haptic_panel = haptic_panel;
-        caps.dpi_gestures = dpi_gestures;
+        caps.haptic_panel = found.haptic_panel;
+        caps.dpi_gestures = found.dpi_gestures;
+        caps.presenter_controls = found.presenter_controls;
     }
     Ok(())
+}
+
+/// Capability facts decoded from a HID++ `0x1b04` control table.
+#[derive(Default)]
+struct ReprogControlCapabilities {
+    haptic_panel: bool,
+    dpi_gestures: bool,
+    presenter_controls: bool,
+}
+
+/// Inspect a `0x1b04` table once for every control that needs more than
+/// feature-ID membership to identify. Returns `None` when a read failed
+/// part-way through the control walk.
+///
+/// The distinction matters because the answer is memoized for the refresh
+/// interval: reporting a lost reply as `false` hides the Actions Ring or
+/// Presenter tab for half a minute on a device that actually supports it.
+async fn reprog_control_capabilities(
+    feature: &ReprogControlsFeature,
+    probe_haptic_controls: bool,
+) -> Option<ReprogControlCapabilities> {
+    let count = feature.get_count().await.ok()?;
+    let mut caps = ReprogControlCapabilities::default();
+    for index in 0..count {
+        let info = feature.get_cid_info(index).await.ok()?;
+        caps.haptic_panel |= probe_haptic_controls
+            && info.cid == control_ids::HAPTIC_PANEL
+            && info.flags.is_divertable();
+        caps.dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
+            && info.flags.is_divertable()
+            && info.flags.supports_raw_xy();
+        caps.presenter_controls |=
+            info.flags.is_divertable() && is_presenter_control_task(info.task_id);
+    }
+    Some(caps)
+}
+
+/// Whether a `0x1b04` task identifies a Spotlight-class presenter control.
+fn is_presenter_control_task(task: TaskId) -> bool {
+    matches!(
+        task,
+        task_ids::SW_CUSTOM_HIGHLIGHT
+            | task_ids::SWITCH_HIGHLIGHTING
+            | task_ids::KEYBOARD_RIGHT_ARROW
+            | task_ids::FAST_FORWARD
+            | task_ids::KEYBOARD_LEFT_ARROW
+            | task_ids::FAST_BACKWARD
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use hidpp::feature::{
         CreatableFeature as _, battery_status::BatteryStatusFeature,
-        battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
+        battery_voltage::BatteryVoltageFeature, reprog_controls::task_ids,
+        unified_battery::UnifiedBatteryFeature,
     };
 
-    use super::{BatteryProbe, ProbedFeatures, battery_feature_index, probe_features};
+    use super::{
+        BatteryProbe, ProbedFeatures, battery_feature_index, is_presenter_control_task,
+        probe_features,
+    };
     use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 
     async fn control_probe(
@@ -486,5 +530,20 @@ mod tests {
     fn no_battery_feature_means_no_index() {
         assert_eq!(battery_feature_index([0x0001, 0x2201, 0x1b04]), None);
         assert_eq!(battery_feature_index([]), None);
+    }
+
+    #[test]
+    fn spotlight_tasks_are_recognized_without_a_product_allow_list() {
+        for task in [
+            task_ids::SW_CUSTOM_HIGHLIGHT,
+            task_ids::SWITCH_HIGHLIGHTING,
+            task_ids::KEYBOARD_RIGHT_ARROW,
+            task_ids::FAST_FORWARD,
+            task_ids::KEYBOARD_LEFT_ARROW,
+            task_ids::FAST_BACKWARD,
+        ] {
+            assert!(is_presenter_control_task(task), "{task:?}");
+        }
+        assert!(!is_presenter_control_task(task_ids::CURSOR));
     }
 }

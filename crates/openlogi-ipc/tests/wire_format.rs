@@ -32,6 +32,7 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::color::Rgb;
 use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -42,13 +43,15 @@ use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
     DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, ReceiverSelector,
     ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError, PointerSpeed,
+    PresenterEffect, PresenterSettings,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
     Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    PairingFailure, PairingPhase, PairingUpdate, PresenterObservation, PresenterOverlay,
+    RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -102,7 +105,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
 }
 
 #[test]
@@ -207,6 +210,33 @@ fn request_variant_order() {
         },
         "1902",
     );
+    assert_presenter_request_variant_order();
+}
+
+fn assert_presenter_request_variant_order() {
+    let route = || DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb503,
+    };
+    assert_wire(
+        &AgentRequest::ReadPointerSpeed { route: route() },
+        "1a02fb6d04fb03b5",
+    );
+    assert_wire(
+        &AgentRequest::SetPointerSpeed {
+            route: route(),
+            speed: PointerSpeed::new(4).expect("valid pointer speed"),
+        },
+        "1b02fb6d04fb03b504",
+    );
+    assert_wire(&AgentRequest::ObservePresenter { since: 7 }, "1c07");
+    assert_wire(
+        &AgentRequest::SetPresenterSettings {
+            route: route(),
+            settings: PresenterSettings::default(),
+        },
+        "1d02fb6d04fb03b50107010200000001013200010064648c6ec80666663362333006666666666666",
+    );
 }
 
 #[test]
@@ -280,6 +310,40 @@ fn action_ring_types() {
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
+    assert_wire(&HidppOperation::ReadPointerSpeed, "0f");
+    assert_wire(&HidppOperation::WritePointerSpeed, "10");
+    assert_wire(&PointerSpeed::new(4).expect("valid pointer speed"), "04");
+}
+
+#[test]
+fn presenter_types() {
+    assert_wire(&PresenterEffect::DigitalLaser, "00");
+    assert_wire(&PresenterEffect::Highlight, "01");
+    assert_wire(&PresenterEffect::Magnify, "02");
+    assert_wire(
+        &PresenterSettings::default(),
+        "0107010200000001013200010064648c6ec80666663362333006666666666666",
+    );
+    assert_wire(
+        &PresenterObservation {
+            generation: 9,
+            overlay: Some(PresenterOverlay {
+                effect: PresenterEffect::Magnify,
+                timer_remaining_ms: Some(12_345),
+                timer_current_time: false,
+                effect_size: 125,
+                effect_contrast: 80,
+                effect_color: Rgb::new(0xff, 0x3b, 0x30),
+                magnifier_color: Rgb::new(0x00, 0xa0, 0xff),
+                frozen_position: Some((-12, 34)),
+                cursor_control: true,
+                spotlight_radius: 180,
+                magnifier_radius: 120,
+                magnification: 250,
+            }),
+        },
+        "09010201fb3930007d50066666336233300630306130666601174401b478fa",
+    );
 }
 
 #[test]
@@ -439,6 +503,7 @@ fn device_inventory() {
                 haptic_feedback: true,
                 haptic_panel: true,
                 dpi_gestures: true,
+                presenter_controls: false,
             }),
         }],
     }];

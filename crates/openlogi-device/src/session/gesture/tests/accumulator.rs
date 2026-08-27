@@ -673,3 +673,96 @@ fn a_dpi_button_re_presses_after_a_release() {
         "press → release → press emits exactly three lifecycle edges"
     );
 }
+
+#[test]
+fn a_diverted_presenter_control_preserves_both_physical_edges() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = 0x00da;
+    let buttons = [(cid, ButtonId::PresenterNext)];
+
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &tx,
+    );
+    handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::PresenterNext))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::PresenterNext))
+    );
+}
+
+#[test]
+fn spotlight_task_catalog_resolves_each_presenter_control() {
+    assert_eq!(
+        PRESENTER_BUTTON_TASKS.len(),
+        ButtonId::PRESENTER_BUTTONS.len()
+    );
+    for (task, button) in PRESENTER_BUTTON_TASKS {
+        assert_eq!(presenter_task_for_button(button), Some(task), "{button}");
+    }
+    assert_eq!(presenter_task_for_button(ButtonId::Back), None);
+}
+
+#[test]
+fn original_spotlight_hold_controls_use_the_traced_virtual_cids() {
+    assert_eq!(
+        presenter_hold_cid(ButtonId::PresenterNextHold),
+        Some(0x00da)
+    );
+    assert_eq!(
+        presenter_hold_cid(ButtonId::PresenterBackHold),
+        Some(0x00dc)
+    );
+    assert!(presenter_button_needs_raw_xy(ButtonId::PresenterCursor));
+    assert!(presenter_button_needs_raw_xy(ButtonId::PresenterNextHold));
+    assert!(presenter_button_needs_raw_xy(ButtonId::PresenterBackHold));
+    assert!(!presenter_button_needs_raw_xy(ButtonId::PresenterNext));
+}
+
+#[test]
+fn presenter_raw_xy_is_forwarded_to_its_held_control() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = PRESENTER_HOLD_CIDS[0].0;
+    let buttons = [(cid, ButtonId::PresenterNextHold)];
+
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &tx,
+    );
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 18, dy: -7 },
+        &[],
+        &[],
+        &buttons,
+        &tx,
+    );
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::PresenterNextHold))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::PresenterMotion {
+            button: ButtonId::PresenterNextHold,
+            dx: 18,
+            dy: -7,
+        })
+    );
+}

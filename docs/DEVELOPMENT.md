@@ -114,9 +114,10 @@ Those identifiers are a channel, not a guess from the build type:
 `macos bundle` takes `--channel dev|production` (dev by default) and verifies
 what it stamped, and `macos dmg` refuses a non-production bundle once it is
 given a signing identity. Reproduce the shipped layout locally with
-`--channel production`, but don't sign and run it — it would take over the
-installed app's grants and config, which is exactly what releases
-0.6.24–0.6.26 did in reverse.
+`--channel production`; local production builds automatically use the first
+Apple Development identity so their helper grants remain stable. Use the dev
+channel when you do not want to touch the installed production app's grants and
+config.
 
 To install the CLI binary on `PATH`:
 

@@ -2,8 +2,8 @@
 
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets, stable_id,
+    any_device_needs_capture_rearm, battery_needs_alert, build_devices, configured_wheel_mode,
+    host_switch_links, pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use crate::hardware::WheelModeChange;
 use openlogi_core::app::ForegroundApp;
@@ -12,8 +12,9 @@ use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
 use openlogi_core::device::{
-    Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+    DeviceModelInfo, DeviceTransports, LightCapabilities, PairedDevice, RawDeviceAddress,
+    ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::Dpi;
@@ -51,6 +52,7 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         kind: openlogi_core::device::DeviceKind::Mouse,
         light_capabilities: None,
         online,
+        low_battery: false,
     }
 }
 

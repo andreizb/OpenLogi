@@ -12,7 +12,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{Dpi, PresenterSettings};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -270,6 +270,14 @@ pub struct DeviceConfig {
     /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Host-rendered Logitech Spotlight pointer and timer settings.
+    #[serde(default, skip_serializing_if = "PresenterSettings::is_default")]
+    pub presenter: PresenterSettings,
+    /// Application-specific Spotlight visual, timer, and vibration settings.
+    /// Button actions continue to use [`Self::per_app_bindings`] so the two
+    /// profile surfaces share the same bundle-id namespace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app_presenter: BTreeMap<String, PresenterSettings>,
 }
 
 impl DeviceConfig {
@@ -370,6 +378,8 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            presenter: PresenterSettings::default(),
+            per_app_presenter: BTreeMap::new(),
         }
     }
 }
@@ -490,6 +500,10 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    presenter: PresenterSettings,
+    #[serde(default)]
+    per_app_presenter: BTreeMap<String, PresenterSettings>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -550,6 +564,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            presenter: raw.presenter,
+            per_app_presenter: raw.per_app_presenter,
         }
     }
 }

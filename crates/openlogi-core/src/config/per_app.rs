@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use super::Config;
 use crate::binding::{Action, Binding, ButtonId};
+use crate::hid::PresenterSettings;
 
 impl Config {
     /// Resolve the effective binding map for `device_key`, overlaying the
@@ -91,10 +92,21 @@ impl Config {
 
     /// Every application key `device_key` has a profile for, in key order.
     pub fn app_profiles(&self, device_key: &str) -> impl Iterator<Item = &str> {
-        self.devices
+        let mut profiles = self
+            .devices
             .get(device_key)
             .into_iter()
-            .flat_map(|device| device.per_app_bindings.keys().map(String::as_str))
+            .flat_map(|device| {
+                device
+                    .per_app_bindings
+                    .keys()
+                    .chain(device.per_app_presenter.keys())
+                    .map(String::as_str)
+            })
+            .collect::<Vec<_>>();
+        profiles.sort_unstable();
+        profiles.dedup();
+        profiles.into_iter()
     }
 
     /// Drop `device_key`'s whole profile for `app`. Nothing happens when there
@@ -102,6 +114,7 @@ impl Config {
     pub fn remove_app_profile(&mut self, device_key: &str, app: &str) {
         if let Some(device) = self.devices.get_mut(device_key) {
             device.per_app_bindings.remove(app);
+            device.per_app_presenter.remove(app);
         }
     }
 
@@ -113,7 +126,46 @@ impl Config {
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
             app_overlay(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
+                || app_overlay(&d.per_app_presenter, app).is_some()
         })
+    }
+
+    /// Effective Spotlight settings after applying an application profile.
+    #[must_use]
+    pub fn effective_presenter(
+        &self,
+        device_key: &str,
+        bundle_id: Option<&str>,
+    ) -> PresenterSettings {
+        let Some(device) = self.devices.get(device_key) else {
+            return PresenterSettings::default();
+        };
+        bundle_id
+            .and_then(|bundle| app_overlay(&device.per_app_presenter, bundle))
+            .copied()
+            .unwrap_or(device.presenter)
+    }
+
+    /// Replace or remove an application-specific Spotlight profile.
+    pub fn set_per_app_presenter(
+        &mut self,
+        device_key: &str,
+        bundle_id: &str,
+        settings: Option<PresenterSettings>,
+    ) {
+        let profiles = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .per_app_presenter;
+        match settings {
+            Some(settings) => {
+                profiles.insert(bundle_id.to_string(), settings);
+            }
+            None => {
+                profiles.remove(bundle_id);
+            }
+        }
     }
 }
 

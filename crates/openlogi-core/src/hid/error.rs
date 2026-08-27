@@ -133,6 +133,10 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read the current Spotlight pointer-speed level.
+    ReadPointerSpeed,
+    /// Write the Spotlight pointer-speed level.
+    WritePointerSpeed,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

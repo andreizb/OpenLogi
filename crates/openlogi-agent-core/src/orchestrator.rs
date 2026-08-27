@@ -22,6 +22,7 @@ use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
+use openlogi_core::hid::PresenterSettings;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, KEYBOARD_KEY_CIDS,
 };
@@ -45,7 +46,7 @@ use crate::{DpiCycleState, DpiCycles};
 mod devices;
 
 #[cfg(test)]
-use devices::{VOLATILE_REAPPLY_CONFIRM_RETRIES, reapply_targets};
+use devices::{VOLATILE_REAPPLY_CONFIRM_RETRIES, battery_needs_alert, reapply_targets};
 use devices::{
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
     is_hidpp_device, pick_current, plan_reapply, stable_id,
@@ -72,6 +73,8 @@ struct AgentDevice {
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
     online: bool,
+    /// This snapshot crossed the low-battery threshold while discharging.
+    low_battery: bool,
 }
 
 /// Cheaply cloneable handles handed to hooks and background managers.
@@ -481,10 +484,15 @@ impl Orchestrator {
                 let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
                 let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
                     .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+                let presenter_controls = dev
+                    .capabilities
+                    .unwrap_or_else(|| Capabilities::presumed_from_kind(dev.kind))
+                    .presenter_controls;
                 Some(plan_for_device(
                     &self.config,
                     physical_key,
                     &dev.config_key,
+                    presenter_controls,
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,
@@ -797,6 +805,33 @@ impl Orchestrator {
             InventoryState::Ready { .. } => InventoryHealth::Ready,
             InventoryState::Unavailable => InventoryHealth::Unavailable,
         }
+    }
+
+    /// Online Spotlight devices that currently need the configured one-shot
+    /// low-battery vibration. The lifecycle owns edge de-duplication so a
+    /// steady two-second inventory poll never repeats the alert.
+    #[must_use]
+    pub fn presenter_low_battery_alerts(&self) -> Vec<(String, DeviceRoute, PresenterSettings)> {
+        self.devices
+            .iter()
+            .filter(|device| {
+                device.online
+                    && device.low_battery
+                    && self.config.device_enabled(&device.config_key)
+                    && device
+                        .capabilities
+                        .unwrap_or_else(|| Capabilities::presumed_from_kind(device.kind))
+                        .presenter_controls
+            })
+            .filter_map(|device| {
+                Some((
+                    device.config_key.clone(),
+                    device.route.clone()?,
+                    self.config
+                        .effective_presenter(&device.config_key, self.current_app.as_deref()),
+                ))
+            })
+            .collect()
     }
 
     /// Republish the device facts the GUI observes, reading the one field that

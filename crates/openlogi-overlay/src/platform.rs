@@ -37,6 +37,32 @@ pub fn configure_windows() {
     }
 }
 
+/// Make the full-display presenter window click-through so it never blocks
+/// Keynote, PowerPoint, or the desktop beneath the visual effect.
+#[cfg(target_os = "macos")]
+pub fn configure_presenter_window() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowSharingType};
+
+    if let Some(marker) = MainThreadMarker::new() {
+        for window in NSApplication::sharedApplication(marker).windows() {
+            let frame = window.frame();
+            if frame.size.width > 1000.0 && frame.size.height > 600.0 {
+                window.setIgnoresMouseEvents(true);
+                // The magnifier captures the ordinary on-screen composite so
+                // wallpaper and adjacent applications are both present. Keep
+                // this transparent overlay out of that composite to prevent
+                // recursive/stale lens images.
+                window.setSharingType(NSWindowSharingType::None);
+            }
+        }
+    }
+}
+
+/// Other platforms do not expose a uniform click-through popup toggle here.
+#[cfg(not(target_os = "macos"))]
+pub fn configure_presenter_window() {}
+
 /// No native application policy is required away from macOS.
 #[cfg(not(target_os = "macos"))]
 pub fn configure_application() {}
@@ -100,6 +126,7 @@ pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<Click
 /// One display's global geometry, in the same top-left-origin global point
 /// space that `openlogi_hook::cursor_position()` reports.
 #[cfg(not(target_os = "windows"))]
+#[derive(Clone, Debug)]
 pub struct CursorDisplay {
     /// Native display id; on macOS the `CGDirectDisplayID`, numerically equal
     /// to GPUI's `DisplayId` for the same display.
@@ -116,11 +143,21 @@ pub struct CursorDisplay {
 /// bounds are display-relative), so mapping a global cursor position to its
 /// display has to go through CoreGraphics.
 #[cfg(target_os = "macos")]
+pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
+    active_displays().into_iter().find(|display| {
+        let (origin_x, origin_y) = display.origin;
+        let (width, height) = display.size;
+        x >= origin_x && x < origin_x + width && y >= origin_y && y < origin_y + height
+    })
+}
+
+/// Global geometry for every active display.
+#[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
     reason = "CGGetActiveDisplayList/CGDisplayBounds are plain C FFI; GPUI exposes no global display bounds"
 )]
-pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
+pub fn active_displays() -> Vec<CursorDisplay> {
     use core_graphics::display::{CGDisplayBounds, CGGetActiveDisplayList};
 
     const MAX_DISPLAYS: u32 = 32;
@@ -130,21 +167,20 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
     // reports how many entries were actually filled.
     let result = unsafe { CGGetActiveDisplayList(MAX_DISPLAYS, ids.as_mut_ptr(), &raw mut count) };
     if result != 0 {
-        return None;
+        return Vec::new();
     }
-    ids.iter().take(count as usize).find_map(|&id| {
-        // SAFETY: side-effect-free C getter on an id from the active list.
-        let bounds = unsafe { CGDisplayBounds(id) };
-        let contains = x >= bounds.origin.x
-            && x < bounds.origin.x + bounds.size.width
-            && y >= bounds.origin.y
-            && y < bounds.origin.y + bounds.size.height;
-        contains.then(|| CursorDisplay {
-            id: u64::from(id),
-            origin: (bounds.origin.x, bounds.origin.y),
-            size: (bounds.size.width, bounds.size.height),
+    ids.iter()
+        .take(count as usize)
+        .map(|&id| {
+            // SAFETY: side-effect-free C getter on an id from the active list.
+            let bounds = unsafe { CGDisplayBounds(id) };
+            CursorDisplay {
+                id: u64::from(id),
+                origin: (bounds.origin.x, bounds.origin.y),
+                size: (bounds.size.width, bounds.size.height),
+            }
         })
-    })
+        .collect()
 }
 
 /// On Linux the GPUI display list already carries global origins, so there is
@@ -153,3 +189,59 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
     None
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn active_displays() -> Vec<CursorDisplay> {
+    Vec::new()
+}
+
+/// Whether the overlay helper may capture the visible desktop composite.
+#[cfg(target_os = "macos")]
+pub fn has_screen_capture_access() -> bool {
+    core_graphics::access::ScreenCaptureAccess.preflight()
+}
+
+/// Register and request Screen Recording for the overlay helper itself.
+#[cfg(target_os = "macos")]
+pub fn request_screen_capture_access() {
+    if !has_screen_capture_access() {
+        let _ = core_graphics::access::ScreenCaptureAccess.request();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn has_screen_capture_access() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_screen_capture_access() {}
+
+/// Hide the native cursor on the display containing `(x, y)`, returning the
+/// display id needed to balance the CoreGraphics hide count later.
+#[cfg(target_os = "macos")]
+pub fn hide_cursor_at(x: f64, y: f64) -> Option<u32> {
+    let display = display_containing(x, y)?;
+    let id = u32::try_from(display.id).ok()?;
+    core_graphics::display::CGDisplay::new(id)
+        .hide_cursor()
+        .ok()
+        .map(|()| id)
+}
+
+/// Balance a previous [`hide_cursor_at`] call. CoreGraphics tracks hide/show
+/// as a counter, so we must only show a display we actually hid.
+#[cfg(target_os = "macos")]
+pub fn show_cursor(display_id: Option<u32>) {
+    if let Some(id) = display_id {
+        let _ = core_graphics::display::CGDisplay::new(id).show_cursor();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn hide_cursor_at(_x: f64, _y: f64) -> Option<u32> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn show_cursor(_display_id: Option<u32>) {}

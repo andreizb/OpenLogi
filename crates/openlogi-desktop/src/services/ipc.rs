@@ -61,9 +61,9 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetLight, SetLightManualPower, SetLighting, SetSmartShift,
-    StartPairing,
+    CancelPairing, Command, PairDevice, ReadDpi, ReadPointerSpeed, ReadSmartShift, ReloadConfig,
+    RequestAccessibilityPrompt, SetDpi, SetLight, SetLightManualPower, SetLighting,
+    SetPointerSpeed, SetSmartShift, StartPairing,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry

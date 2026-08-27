@@ -6,6 +6,9 @@ use hidpp::{
     feature::{
         CreatableFeature,
         haptic_feedback::{HapticFeedbackFeature, HapticIntensity, HapticWaveform},
+        presenter_control::{
+            PresenterControlFeature, PresenterVibrationIntensity, PresenterVibrationLength,
+        },
     },
 };
 
@@ -43,6 +46,35 @@ async fn feature_on_channel(
     ))
 }
 
+async fn presenter_feature_on_channel(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+) -> Result<(Arc<PresenterControlFeature>, u8), WriteError> {
+    let mut device = Device::new(Arc::clone(channel), device_index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable {
+            index: device_index,
+        })?;
+    let info = device
+        .root()
+        .get_feature(PresenterControlFeature::ID)
+        .await
+        .map_err(|error| {
+            classify_hidpp_error(
+                error,
+                HidppOperation::ResolveFeature,
+                PresenterControlFeature::ID,
+            )
+        })?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: PresenterControlFeature::ID,
+        })?;
+    Ok((
+        device.add_feature::<PresenterControlFeature>(info.index),
+        info.index,
+    ))
+}
+
 /// Where the haptic feature lives: enough to rebuild the accessor without
 /// I/O. Haptic plays are fired per ring hover, and resolving the feature
 /// (device ping + root lookup) costs two extra HID++ round-trips per play —
@@ -66,6 +98,14 @@ struct FeatureLocation {
 }
 
 static CACHED_LOCATION: Mutex<Option<FeatureLocation>> = Mutex::new(None);
+
+struct PresenterFeatureLocation {
+    channel: Weak<HidppChannel>,
+    device_index: u8,
+    feature_index: u8,
+}
+
+static CACHED_PRESENTER_LOCATION: Mutex<Option<PresenterFeatureLocation>> = Mutex::new(None);
 
 /// Rebuild the cached accessor for exactly `channel`, without I/O. `None`
 /// when nothing is cached, the entry belongs to another (or a dead) channel,
@@ -101,12 +141,63 @@ fn store_cached_location(channel: &Arc<HidppChannel>, device_index: u8, feature_
     }
 }
 
+fn cached_presenter_feature(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Option<Arc<PresenterControlFeature>> {
+    let guard = CACHED_PRESENTER_LOCATION.lock().ok()?;
+    let location = guard.as_ref()?;
+    (location.device_index == index
+        && location
+            .channel
+            .upgrade()
+            .is_some_and(|live| Arc::ptr_eq(&live, channel)))
+    .then(|| {
+        Arc::new(<PresenterControlFeature as CreatableFeature>::new(
+            Arc::clone(channel),
+            index,
+            location.feature_index,
+        ))
+    })
+}
+
+fn store_cached_presenter_location(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    feature_index: u8,
+) {
+    if let Ok(mut guard) = CACHED_PRESENTER_LOCATION.lock() {
+        *guard = Some(PresenterFeatureLocation {
+            channel: Arc::downgrade(channel),
+            device_index,
+            feature_index,
+        });
+    }
+}
+
 /// Forget the cached location — called when I/O through it fails, so the next
 /// play re-resolves instead of replaying a location the device disowned.
 fn clear_cached_location() {
     if let Ok(mut guard) = CACHED_LOCATION.lock() {
         *guard = None;
     }
+    if let Ok(mut guard) = CACHED_PRESENTER_LOCATION.lock() {
+        *guard = None;
+    }
+}
+
+fn presenter_pulse(
+    waveform: HapticWaveform,
+) -> (PresenterVibrationLength, PresenterVibrationIntensity) {
+    let (length, intensity) = match waveform {
+        HapticWaveform::DampStateChange => (6, 200),
+        HapticWaveform::SubtleCollision => (2, 120),
+    };
+    (
+        PresenterVibrationLength::new(length)
+            .unwrap_or_else(|| unreachable!("validated pulse length")),
+        PresenterVibrationIntensity::new(intensity),
+    )
 }
 
 /// Ensure the firmware haptic engine is armed: enabled, with a non-zero
@@ -124,7 +215,17 @@ fn clear_cached_location() {
 pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
-    let (feature, feature_index) = feature_on_channel(channel, index).await?;
+    let (feature, feature_index) = match feature_on_channel(channel, index).await {
+        Ok(feature) => feature,
+        Err(WriteError::FeatureUnsupported { feature_hex })
+            if feature_hex == HapticFeedbackFeature::ID =>
+        {
+            let (_, presenter_index) = presenter_feature_on_channel(channel, index).await?;
+            store_cached_presenter_location(channel, index, presenter_index);
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
     store_cached_location(channel, index, feature_index);
     let config = feature.get_configuration().await.map_err(|error| {
         clear_cached_location();
@@ -159,20 +260,90 @@ pub async fn play_haptic_on(
 ) -> Result<(), WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
+    if let Some(feature) = cached_presenter_feature(channel, index) {
+        let (length, intensity) = presenter_pulse(waveform);
+        if feature.vibrate(length, intensity).await.is_ok() {
+            return Ok(());
+        }
+        clear_cached_location();
+    }
     if let Some(feature) = cached_feature(channel, index) {
         if feature.play(waveform).await.is_ok() {
             return Ok(());
         }
         clear_cached_location();
     }
-    let (feature, feature_index) = feature_on_channel(channel, index).await?;
-    let result = feature.play(waveform).await.map_err(|error| {
-        classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
-    });
-    if result.is_ok() {
-        store_cached_location(channel, index, feature_index);
+    match feature_on_channel(channel, index).await {
+        Ok((feature, feature_index)) => {
+            let result = feature.play(waveform).await.map_err(|error| {
+                classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+            });
+            if result.is_ok() {
+                store_cached_location(channel, index, feature_index);
+            }
+            result
+        }
+        Err(WriteError::FeatureUnsupported { feature_hex })
+            if feature_hex == HapticFeedbackFeature::ID =>
+        {
+            let (feature, feature_index) = presenter_feature_on_channel(channel, index).await?;
+            let (length, intensity) = presenter_pulse(waveform);
+            let result = feature.vibrate(length, intensity).await.map_err(|error| {
+                classify_hidpp_error(
+                    error,
+                    HidppOperation::PlayHaptic,
+                    PresenterControlFeature::ID,
+                )
+            });
+            if result.is_ok() {
+                store_cached_presenter_location(channel, index, feature_index);
+            }
+            result
+        }
+        Err(error) => Err(error),
     }
-    result
+}
+
+/// Play the original Spotlight timer pulse at a configured intensity.
+///
+/// Devices without the presenter-specific feature fall back to the standard
+/// haptic engine.
+pub async fn play_presenter_haptic_on(
+    shared: &SharedChannel,
+    intensity_percent: u8,
+) -> Result<(), WriteError> {
+    let channel = shared.channel();
+    let index = shared.device_index();
+    let scaled = u16::from(intensity_percent.min(100)) * u16::from(u8::MAX) / 100;
+    let intensity = PresenterVibrationIntensity::new(u8::try_from(scaled).unwrap_or(u8::MAX));
+    let length = PresenterVibrationLength::new(6)
+        .unwrap_or_else(|| unreachable!("validated presenter pulse length"));
+
+    if let Some(feature) = cached_presenter_feature(channel, index) {
+        if feature.vibrate(length, intensity).await.is_ok() {
+            return Ok(());
+        }
+        clear_cached_location();
+    }
+    match presenter_feature_on_channel(channel, index).await {
+        Ok((feature, feature_index)) => {
+            let result = feature.vibrate(length, intensity).await.map_err(|error| {
+                classify_hidpp_error(
+                    error,
+                    HidppOperation::PlayHaptic,
+                    PresenterControlFeature::ID,
+                )
+            });
+            if result.is_ok() {
+                store_cached_presenter_location(channel, index, feature_index);
+            }
+            result
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {
+            play_haptic_on(shared, HapticWaveform::DampStateChange).await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Play a waveform immediately by route.
@@ -183,10 +354,25 @@ pub async fn play_haptic(
 ) -> Result<(), WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let (feature, _) = feature_on_channel(&channel, index).await?;
-        feature.play(waveform).await.map_err(|error| {
-            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
-        })
+        match feature_on_channel(&channel, index).await {
+            Ok((feature, _)) => feature.play(waveform).await.map_err(|error| {
+                classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+            }),
+            Err(WriteError::FeatureUnsupported { feature_hex })
+                if feature_hex == HapticFeedbackFeature::ID =>
+            {
+                let (feature, _) = presenter_feature_on_channel(&channel, index).await?;
+                let (length, intensity) = presenter_pulse(waveform);
+                feature.vibrate(length, intensity).await.map_err(|error| {
+                    classify_hidpp_error(
+                        error,
+                        HidppOperation::PlayHaptic,
+                        PresenterControlFeature::ID,
+                    )
+                })
+            }
+            Err(error) => Err(error),
+        }
     })
     .await
 }

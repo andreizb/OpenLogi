@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{LightCommand, PairingError, PointerSpeed, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -64,6 +64,16 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read Spotlight's current pointer-speed level.
+pub async fn get_pointer_speed(route: &DeviceRoute) -> Result<PointerSpeed, WriteError> {
+    device::get_pointer_speed(&*native_backend(), route).await
+}
+
+/// Set Spotlight's pointer-speed level.
+pub async fn set_pointer_speed(route: &DeviceRoute, speed: PointerSpeed) -> Result<(), WriteError> {
+    device::set_pointer_speed(&*native_backend(), route, speed).await
 }
 
 /// Read the SmartShift mode, threshold and torque of the device `route` reaches.

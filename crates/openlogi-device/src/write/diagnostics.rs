@@ -14,6 +14,7 @@ use hidpp::{
     protocol::v20::Hidpp20Error,
 };
 
+use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
@@ -66,40 +67,50 @@ pub async fn dump_features(
 ) -> Result<Vec<FeatureEntry>, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        // The root feature exposes the FeatureSet (0x0001) at a fixed
-        // address; we look it up directly rather than going through
-        // `enumerate_features` so the iteration is observable.
-        let feature_set_info = device
-            .root()
-            .get_feature(FeatureSetFeature::ID)
-            .await
-            .map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
-            })?
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: FeatureSetFeature::ID,
-            })?;
-        let feature_set = device.add_feature::<FeatureSetFeature>(feature_set_info.index);
-        let count = feature_set.count().await.map_err(|e| {
-            classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
-        })?;
-        let mut entries = Vec::with_capacity(usize::from(count));
-        for i in 0..=count {
-            let info = feature_set.get_feature(i).await.map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
-            })?;
-            entries.push(FeatureEntry {
-                id: info.id,
-                version: info.version,
-                typ: info.typ,
-            });
-        }
-        Ok(entries)
+        dump_features_on_channel(&channel, index).await
     })
     .await
+}
+
+/// Enumerate every HID++ feature on an already-open channel.
+pub async fn dump_features_on(shared: &SharedChannel) -> Result<Vec<FeatureEntry>, WriteError> {
+    dump_features_on_channel(shared.channel(), shared.device_index()).await
+}
+
+async fn dump_features_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Vec<FeatureEntry>, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    // The root feature exposes the FeatureSet (0x0001) at a fixed address; we
+    // look it up directly rather than going through `enumerate_features` so
+    // the iteration is observable.
+    let feature_set_info = device
+        .root()
+        .get_feature(FeatureSetFeature::ID)
+        .await
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID))?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: FeatureSetFeature::ID,
+        })?;
+    let feature_set = device.add_feature::<FeatureSetFeature>(feature_set_info.index);
+    let count = feature_set.count().await.map_err(|e| {
+        classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
+    })?;
+    let mut entries = Vec::with_capacity(usize::from(count));
+    for i in 0..=count {
+        let info = feature_set.get_feature(i).await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
+        })?;
+        entries.push(FeatureEntry {
+            id: info.id,
+            version: info.version,
+            typ: info.typ,
+        });
+    }
+    Ok(entries)
 }
 
 /// Enumerate the device's HID++ `0x1b04` reprogrammable controls. This is a
@@ -113,33 +124,47 @@ pub async fn dump_reprog_controls(
 ) -> Result<Vec<ReprogControlEntry>, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let info = device
-            .root()
-            .get_feature(reprog_controls::FEATURE_ID)
-            .await
-            .map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
-            })?
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: reprog_controls::FEATURE_ID,
-            })?;
-        let rc = ReprogControlsV4::new(Arc::clone(&channel), index, info.index);
-        let count = rc.get_count().await.map_err(|e| {
-            classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
-        })?;
-        let mut entries = Vec::with_capacity(usize::from(count));
-        for i in 0..count {
-            let control = rc.get_cid_info(i).await.map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
-            })?;
-            entries.push(control.into());
-        }
-        Ok(entries)
+        dump_reprog_controls_on_channel(&channel, index).await
     })
     .await
+}
+
+/// Enumerate HID++ `0x1b04` controls on an already-open channel.
+pub async fn dump_reprog_controls_on(
+    shared: &SharedChannel,
+) -> Result<Vec<ReprogControlEntry>, WriteError> {
+    dump_reprog_controls_on_channel(shared.channel(), shared.device_index()).await
+}
+
+async fn dump_reprog_controls_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Vec<ReprogControlEntry>, WriteError> {
+    let device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let info = device
+        .root()
+        .get_feature(reprog_controls::FEATURE_ID)
+        .await
+        .map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
+        })?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: reprog_controls::FEATURE_ID,
+        })?;
+    let rc = ReprogControlsV4::new(Arc::clone(channel), index, info.index);
+    let count = rc.get_count().await.map_err(|e| {
+        classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
+    })?;
+    let mut entries = Vec::with_capacity(usize::from(count));
+    for i in 0..count {
+        let control = rc.get_cid_info(i).await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
+        })?;
+        entries.push(control.into());
+    }
+    Ok(entries)
 }
 
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`
@@ -153,47 +178,59 @@ pub async fn read_battery_raw(
 ) -> Result<String, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-
-        match open_feature::<UnifiedBatteryFeature>(&mut device).await {
-            Ok(feature) => {
-                let info = feature
-                    .get_battery_info()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!(
-                    "0x1004 UnifiedBattery: percentage={} level={:?} status={:?}",
-                    info.charging_percentage, info.level, info.status
-                ));
-            }
-            Err(WriteError::FeatureUnsupported { .. }) => {}
-            Err(e) => return Err(e),
-        }
-
-        match open_feature::<BatteryStatusFeature>(&mut device).await {
-            Ok(feature) => {
-                let info = feature
-                    .get_battery_level_status()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!(
-                    "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
-                    info.discharge_level, info.next_level, info.status
-                ));
-            }
-            Err(WriteError::FeatureUnsupported { .. }) => {}
-            Err(e) => return Err(e),
-        }
-
-        // Reached only when neither 0x1004 nor 0x1000 is present; report the
-        // preferred feature rather than implying 0x1000 was specifically absent.
-        Err(WriteError::FeatureUnsupported {
-            feature_hex: 0x1004,
-        })
+        read_battery_raw_on_channel(&channel, index).await
     })
     .await
+}
+
+/// Read the raw battery report on an already-open channel.
+pub async fn read_battery_raw_on(shared: &SharedChannel) -> Result<String, WriteError> {
+    read_battery_raw_on_channel(shared.channel(), shared.device_index()).await
+}
+
+async fn read_battery_raw_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<String, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+
+    match open_feature::<UnifiedBatteryFeature>(&mut device).await {
+        Ok(feature) => {
+            let info = feature
+                .get_battery_info()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1004 UnifiedBattery: percentage={} level={:?} status={:?}",
+                info.charging_percentage, info.level, info.status
+            ));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    match open_feature::<BatteryStatusFeature>(&mut device).await {
+        Ok(feature) => {
+            let info = feature
+                .get_battery_level_status()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
+                info.discharge_level, info.next_level, info.status
+            ));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    // Reached only when neither 0x1004 nor 0x1000 is present; report the
+    // preferred feature rather than implying 0x1000 was specifically absent.
+    Err(WriteError::FeatureUnsupported {
+        feature_hex: 0x1004,
+    })
 }
 
 /// Firmware fields for one entity whose record the device answered and this
@@ -293,6 +330,13 @@ pub async fn dump_firmware_entities(
         dump_firmware_entities_on_channel(&channel, index).await
     })
     .await
+}
+
+/// Read firmware entities on an already-open channel.
+pub async fn dump_firmware_entities_on(
+    shared: &SharedChannel,
+) -> Result<Vec<FirmwareEntity>, WriteError> {
+    dump_firmware_entities_on_channel(shared.channel(), shared.device_index()).await
 }
 
 /// [`dump_firmware_entities`] against an already-open channel, the shape the

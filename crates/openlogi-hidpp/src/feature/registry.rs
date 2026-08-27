@@ -41,6 +41,8 @@ use crate::{
         multi_platform::MultiPlatformFeature,
         per_key_lighting::PerKeyLightingFeature,
         persistent_remappable_action::PersistentRemappableActionFeature,
+        pointer_speed::PointerSpeedFeature,
+        presenter_control::PresenterControlFeature,
         report_rate::ReportRateFeature,
         reprog_controls::ReprogControlsFeature,
         rgb_effects::RgbEffectsFeature,
@@ -189,7 +191,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     // Reverse-engineered name observed in MX Master 4 metadata; no public HID++
     // definition is available, so it remains intentionally unimplemented.
     0x19c0 "ForceSensingButton",
-    0x1a00 "PresenterControl",
+    0x1a00 "PresenterControl" => PresenterControlFeature,
     0x1a01 "Sensor3D",
     0x1b00 "ReprogControls",
     0x1b01 "ReprogControls2",
@@ -215,7 +217,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x2200 "MousePointer" => MousePointerFeature,
     0x2201 "AdjustableDpi" => AdjustableDpiFeature,
     0x2202 "ExtendedAdjustableDpi" => ExtendedDpiFeature,
-    0x2205 "PointerMotionScaling",
+    0x2205 "PointerMotionScaling" => PointerSpeedFeature,
     0x2230 "SensorAngleSnapping",
     0x2240 "SurfaceTuning",
     0x2250 "XyStats",

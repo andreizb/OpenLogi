@@ -134,6 +134,97 @@ impl InputDispatcher {
         self.gesture_presses.cancel_session(session);
     }
 
+    fn dispatch_button_down(
+        outputs: &GestureOutputs,
+        gesture_presses: &mut GesturePresses,
+        session: &HidppSessionId,
+        key: &str,
+        plan: &DispatchPlan,
+        button: ButtonId,
+    ) {
+        if outputs.actions.presenter_button_down(button, Some(key)) {
+            debug!(key, ?button, "presenter control consumed");
+            return;
+        }
+        // A raw-XY gesture source owns its click/swipe map; its physical
+        // lifecycle is still tracked, but it must not also fire the
+        // single-action projection on down.
+        let is_gesture = plan.gesture_bindings.contains_key(&button)
+            || plan.side_gesture_bindings.contains_key(&button);
+        let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
+        if let Some(binding) = binding {
+            debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
+        } else {
+            debug!(key, ?button, "HID++ button with no binding — ignored");
+        }
+        let press = outputs
+            .actions
+            .try_hidpp_button_down(session, button, binding);
+        if is_gesture {
+            if let Some(press) = press {
+                gesture_presses.start(session, button, press);
+            } else {
+                gesture_presses.end(session, button);
+            }
+        }
+    }
+
+    fn dispatch_presenter_motion(
+        outputs: &GestureOutputs,
+        key: &str,
+        plan: &DispatchPlan,
+        button: ButtonId,
+        dx: i16,
+        dy: i16,
+    ) {
+        if button == ButtonId::PresenterCursor {
+            openlogi_inject::move_pointer_by(i32::from(dx), i32::from(dy));
+            return;
+        }
+        let Some(binding) = plan.bindings.get(&button) else {
+            return;
+        };
+        let action = binding.click_action();
+        let horizontal = i32::from(dx).abs() > i32::from(dy).abs();
+        let magnitude = i32::from(dx).abs().max(i32::from(dy).abs());
+        let fires = match action {
+            Action::ScrollUp => dy < -2,
+            Action::ScrollDown => dy > 2,
+            Action::HorizontalScrollLeft => horizontal && dx < -2,
+            Action::HorizontalScrollRight => horizontal && dx > 2,
+            Action::VolumeDown | Action::VolumeUp => magnitude >= 24,
+            Action::PresenterFastForward
+            | Action::PresenterFastBackward
+            | Action::PresenterScroll
+            | Action::PresenterVolume => magnitude >= 12,
+            _ => false,
+        };
+        if !fires {
+            return;
+        }
+        debug!(key, ?button, action = %action.label(), "presenter motion → action");
+        match action {
+            Action::PresenterFastForward => dispatch_presenter_key("Right"),
+            Action::PresenterFastBackward => dispatch_presenter_key("Left"),
+            Action::PresenterScroll => {
+                let direction = if dy < 0 {
+                    Action::ScrollUp
+                } else {
+                    Action::ScrollDown
+                };
+                outputs.actions.dispatch(&direction, Some(key));
+            }
+            Action::PresenterVolume => {
+                let direction = if dy < 0 {
+                    Action::VolumeUp
+                } else {
+                    Action::VolumeDown
+                };
+                outputs.actions.dispatch(&direction, Some(key));
+            }
+            _ => outputs.actions.dispatch(&action, Some(key)),
+        }
+    }
     /// Route one captured input from `session` to its bound action or
     /// re-synthesised scroll output.
     pub(super) fn dispatch(
@@ -171,30 +262,19 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonDown(button) => {
-                // A raw-XY gesture source owns its click/swipe map; its physical
-                // lifecycle is still tracked, but it must not also fire the
-                // single-action projection on down.
-                let is_gesture = plan.gesture_bindings.contains_key(&button)
-                    || plan.side_gesture_bindings.contains_key(&button);
-                let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
-                if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
-                } else {
-                    debug!(key, ?button, "HID++ button with no binding — ignored");
-                }
-                let press = self
-                    .outputs
-                    .actions
-                    .try_hidpp_button_down(session, button, binding);
-                if is_gesture {
-                    if let Some(press) = press {
-                        self.gesture_presses.start(session, button, press);
-                    } else {
-                        self.gesture_presses.end(session, button);
-                    }
-                }
+                Self::dispatch_button_down(
+                    &self.outputs,
+                    &mut self.gesture_presses,
+                    session,
+                    key,
+                    plan,
+                    button,
+                );
             }
             CapturedInput::ButtonUp(button) => {
+                if self.outputs.actions.presenter_button_up(button) {
+                    return;
+                }
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.gesture_presses.end(session, button);
             }
@@ -208,6 +288,9 @@ impl InputDispatcher {
                 self.outputs
                     .actions
                     .dispatch_hidpp_button_pulse(session, button, binding);
+            }
+            CapturedInput::PresenterMotion { button, dx, dy } => {
+                Self::dispatch_presenter_motion(&self.outputs, key, plan, button, dx, dy);
             }
             CapturedInput::Scroll {
                 increments,
@@ -239,6 +322,13 @@ impl InputDispatcher {
             }
         }
     }
+}
+
+fn dispatch_presenter_key(text: &str) {
+    let Ok(combo) = text.parse() else {
+        return;
+    };
+    openlogi_inject::execute(&Action::CustomShortcut(combo));
 }
 
 #[cfg(test)]

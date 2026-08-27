@@ -4,7 +4,10 @@ use std::num::NonZeroU8;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use openlogi_hid::{SmartShiftAutoDisengage, TunableTorque};
+use openlogi_hid::{
+    SmartShiftAutoDisengage, TunableTorque, get_smartshift_status_on, set_smartshift_on,
+    toggle_smartshift_on,
+};
 
 use crate::cmd::diag::select_device;
 
@@ -32,12 +35,12 @@ pub struct SmartshiftArgs {
 
 pub async fn run(args: SmartshiftArgs) -> Result<()> {
     // 0x2110 / 0x2111 = SmartShift — auto-skip devices that expose neither.
-    let (route, name) = select_device(args.device.as_deref(), &[0x2110, 0x2111]).await?;
+    let (route, name, channel) = select_device(args.device.as_deref(), &[0x2110, 0x2111]).await?;
     println!("device: {name} ({route})");
 
     if let Some(n) = args.sensitivity {
         let requested = SmartShiftAutoDisengage::from(n);
-        let before = openlogi_hid::get_smartshift_status(&route)
+        let before = get_smartshift_status_on(&channel)
             .await
             .context("read SmartShift status")?;
         println!(
@@ -45,9 +48,14 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
             before.mode, before.auto_disengage
         );
 
-        let after = openlogi_hid::set_smartshift_sensitivity(&route, requested)
+        let mut desired = before;
+        desired.auto_disengage = requested;
+        set_smartshift_on(&channel, desired)
             .await
             .context("set SmartShift sensitivity")?;
+        let after = get_smartshift_status_on(&channel)
+            .await
+            .context("read SmartShift after sensitivity write")?;
         println!(
             "  read-back: mode={:?} sensitivity={}",
             after.mode, after.auto_disengage
@@ -74,7 +82,7 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         return Ok(());
     }
 
-    let before = openlogi_hid::get_smartshift_status(&route)
+    let before = get_smartshift_status_on(&channel)
         .await
         .context("read SmartShift status")?;
     println!(
@@ -84,12 +92,12 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         before.tunable_torque.map_or(0, TunableTorque::into_inner)
     );
 
-    let new_mode = openlogi_hid::toggle_smartshift(&route)
+    let new_mode = toggle_smartshift_on(&channel)
         .await
         .context("toggle SmartShift")?;
     println!("  toggled to: {new_mode:?}");
 
-    let after = openlogi_hid::get_smartshift_status(&route)
+    let after = get_smartshift_status_on(&channel)
         .await
         .context("read SmartShift after toggle")?;
     println!(
@@ -112,7 +120,7 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
     }
 
     println!("  restoring mode: {:?}", before.mode);
-    openlogi_hid::toggle_smartshift(&route)
+    toggle_smartshift_on(&channel)
         .await
         .context("restore SmartShift")?;
 

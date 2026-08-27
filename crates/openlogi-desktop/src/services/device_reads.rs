@@ -5,19 +5,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DeviceRoute, DpiInfo, PointerSpeed, SmartShiftStatus, WriteError};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDpi, ReadSmartShift};
-use crate::state::{AppState, DeviceKey, DpiLoad, Load, SmartShiftLoad, StateEvent};
+use super::ipc::{Command, ReadDpi, ReadPointerSpeed, ReadSmartShift};
+use crate::state::{
+    AppState, DeviceKey, DpiLoad, Load, PointerSpeedLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
+const POINTER_SPEED: &str = "pointer-speed";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -51,6 +54,7 @@ pub(crate) struct DeviceReads {
     next_flight: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
+    pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
 }
 
 impl DeviceReads {
@@ -129,6 +133,69 @@ impl DeviceReads {
             return;
         }
         self.subscribe_smartshift(key, route, None, false, commands, cx);
+    }
+
+    /// Start the Spotlight pointer-speed query unless this route is already watched.
+    pub(crate) fn ensure_pointer_speed(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .pointer_speed
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_pointer_speed(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let generation = self.take_generation();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadPointerSpeed { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !pointer_speed_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(POINTER_SPEED, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), pointer_speed_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), pointer_speed_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_pointer_speed(&observed_key, generation, load)
+            {
+                cx.emit(StateEvent::PresenterChanged(observed_key.clone()));
+            }
+        });
+        self.pointer_speed.insert(
+            key,
+            DeviceRead {
+                route,
+                generation,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
     }
 
     /// Replace the active SmartShift query with a write-confirmation read.
@@ -227,6 +294,13 @@ impl DeviceReads {
         self.smartshift.get(key).map(|read| &read.load)
     }
 
+    #[must_use]
+    pub(crate) fn pointer_speed_status(&self, key: &DeviceKey) -> PointerSpeedLoad {
+        self.pointer_speed
+            .get(key)
+            .map_or(Load::Unknown, |read| read.load.clone())
+    }
+
     /// Retry an exhausted DPI query without changing its registered fetcher.
     pub(crate) fn retry_dpi(&mut self, key: &DeviceKey) {
         let Some(read) = self.dpi.get_mut(key) else {
@@ -249,6 +323,17 @@ impl DeviceReads {
         read.query.revalidate();
     }
 
+    /// Retry an exhausted Spotlight pointer-speed query.
+    pub(crate) fn retry_pointer_speed(&mut self, key: &DeviceKey) {
+        let Some(read) = self.pointer_speed.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
     /// Publish a SmartShift write optimistically into swr and the view model.
     pub(crate) fn set_smartshift_ready(&mut self, key: &DeviceKey, status: SmartShiftStatus) {
         let value = Arc::new(status);
@@ -263,10 +348,25 @@ impl DeviceReads {
         }
     }
 
+    /// Publish a pointer-speed write optimistically into swr and the view model.
+    pub(crate) fn set_pointer_speed_ready(&mut self, key: &DeviceKey, speed: PointerSpeed) {
+        let value = Arc::new(speed);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<PointerSpeed>, WriteError>(
+                query_key(POINTER_SPEED, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.pointer_speed.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
     /// Forget both feature queries for a device and fence their old flights.
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
         self.remove_smartshift(key);
+        self.remove_pointer_speed(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -283,12 +383,20 @@ impl DeviceReads {
         }
     }
 
+    pub(crate) fn remove_pointer_speed(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.pointer_speed.remove(key) {
+            drop(read);
+            self.clear::<PointerSpeed>(POINTER_SPEED, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
             .dpi
             .keys()
             .chain(self.smartshift.keys())
+            .chain(self.pointer_speed.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -348,6 +456,26 @@ impl DeviceReads {
         read.load = load;
         true
     }
+
+    fn update_pointer_speed(
+        &mut self,
+        key: &DeviceKey,
+        generation: u64,
+        load: PointerSpeedLoad,
+    ) -> bool {
+        let Some(read) = self
+            .pointer_speed
+            .get_mut(key)
+            .filter(|read| read.generation == generation)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
 }
 
 fn query_key(kind: &'static str, key: &DeviceKey) -> (&'static str, &'static str, String) {
@@ -400,6 +528,13 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
 
 fn smartshift_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn pointer_speed_error_is_permanent(error: &WriteError) -> bool {
+    matches!(
+        error,
+        WriteError::FeatureUnsupported { .. } | WriteError::UnsupportedResponse { .. }
+    )
 }
 
 /// Stale data remains renderable while SWR revalidates, but only the settled

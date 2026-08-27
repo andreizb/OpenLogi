@@ -9,7 +9,7 @@
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 use openlogi_core::device::DeviceInventory;
-use openlogi_hid::{DeviceRoute, dump_features};
+use openlogi_hid::{ChannelRegistry, DeviceRoute, SharedChannel, dump_features_on};
 
 pub mod battery;
 pub mod controls;
@@ -54,22 +54,38 @@ impl DiagCmd {
 /// One online, paired device discovered during enumeration, already resolved to
 /// the [`DeviceRoute`] needed to talk to it. Builds a Bolt route when the device
 /// is behind a receiver, a direct route otherwise (USB cable / Bluetooth).
-struct Candidate {
+pub(crate) struct Candidate {
     route: DeviceRoute,
     name: String,
+    /// The channel opened by inventory. Keeping and reusing it avoids opening
+    /// the same macOS IOHID node a second time while the first handle is still
+    /// being retired by the OS.
+    channel: Option<SharedChannel>,
 }
 
 /// Enumerate inventories and resolve every *online* paired device to a route.
-async fn online_devices() -> Result<Vec<Candidate>> {
-    let inventories = openlogi_hid::enumerate().await?;
+pub(crate) async fn online_devices() -> Result<Vec<Candidate>> {
+    let registry = ChannelRegistry::default();
+    let mut enumerator = openlogi_hid::enumerator().with_registry(registry.clone());
+    // Keep the registry attached while retrying: unlike the one-shot helper,
+    // this path must return the channels it opened so every diagnostic can use
+    // the same macOS HID handle instead of reopening the node.
+    let mut inventories = Vec::new();
+    for attempt in 0..3u8 {
+        inventories = enumerator.enumerate().await?;
+        if !inventories.is_empty() || attempt == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
     let mut out = Vec::new();
     for inventory in &inventories {
-        out.extend(online_candidates(inventory));
+        out.extend(online_candidates(inventory, &registry));
     }
     Ok(out)
 }
 
-fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
+fn online_candidates(inventory: &DeviceInventory, registry: &ChannelRegistry) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for paired in inventory.paired.iter().filter(|paired| paired.online) {
         if let Some(route) = DeviceRoute::for_slot(inventory, paired.slot) {
@@ -77,7 +93,15 @@ fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
                 .codename
                 .clone()
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            candidates.push(Candidate { route, name });
+            let Some(channel) = registry.lookup(&route) else {
+                tracing::warn!(%route, "inventory did not publish an open channel for online device");
+                continue;
+            };
+            candidates.push(Candidate {
+                route,
+                name,
+                channel: Some(channel),
+            });
         } else {
             tracing::warn!(
                 receiver = %inventory.receiver.name,
@@ -122,7 +146,7 @@ fn no_match_err(devices: &[Candidate], query: Option<&str>) -> anyhow::Error {
 pub(crate) async fn select_device(
     query: Option<&str>,
     required_features: &[u16],
-) -> Result<(DeviceRoute, String)> {
+) -> Result<(DeviceRoute, String, SharedChannel)> {
     let devices = online_devices().await?;
 
     if let Some(q) = query {
@@ -130,16 +154,23 @@ pub(crate) async fn select_device(
         return devices
             .iter()
             .find(|c| c.name.to_lowercase().contains(&needle))
-            .map(|c| (c.route.clone(), c.name.clone()))
+            .and_then(|c| {
+                c.channel
+                    .clone()
+                    .map(|channel| (c.route.clone(), c.name.clone(), channel))
+            })
             .ok_or_else(|| no_match_err(&devices, query));
     }
 
     if !required_features.is_empty() {
         for c in &devices {
-            match dump_features(&c.route).await {
+            let Some(channel) = c.channel.as_ref() else {
+                continue;
+            };
+            match dump_features_on(channel).await {
                 Ok(entries) => {
                     if entries.iter().any(|e| required_features.contains(&e.id)) {
-                        return Ok((c.route.clone(), c.name.clone()));
+                        return Ok((c.route.clone(), c.name.clone(), channel.clone()));
                     }
                 }
                 Err(e) => {
@@ -161,7 +192,7 @@ pub(crate) async fn select_device(
     devices
         .into_iter()
         .next()
-        .map(|c| (c.route, c.name))
+        .and_then(|c| c.channel.map(|channel| (c.route, c.name, channel)))
         .ok_or_else(|| no_match_err(&[], None))
 }
 
@@ -181,6 +212,7 @@ mod tests {
                 product_id: 0xc539,
             },
             name: name.to_string(),
+            channel: None,
         }
     }
 

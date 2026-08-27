@@ -187,6 +187,32 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Toggle the configured Spotlight visual pointer effect.
+    PresenterPointer,
+    /// Show the Spotlight highlight effect.
+    PresenterHighlight,
+    /// Show the Spotlight magnifier target.
+    PresenterMagnify,
+    /// Start the configured Spotlight presentation timer.
+    PresenterTimer,
+    /// Move the pointer to the centre of the active display.
+    PresenterRecenter,
+    /// Start a slideshow from the current slide.
+    PresenterStartPresentation,
+    /// Advance repeatedly while moving the presenter.
+    PresenterFastForward,
+    /// Go backward repeatedly while moving the presenter.
+    PresenterFastBackward,
+    /// Toggle the slideshow's blank/black screen.
+    PresenterBlankScreen,
+    /// Scroll documents or pages with vertical presenter motion.
+    PresenterScroll,
+    /// Adjust system volume with vertical presenter motion.
+    PresenterVolume,
+    /// Internal capture action that preserves the presenter's native Next key.
+    PresenterNext,
+    /// Internal capture action that preserves the presenter's native Back key.
+    PresenterBack,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -285,6 +311,20 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            // Presenter
+            PresenterPointer "Presenter Pointer" "actions.presenter_pointer" System Pointer,
+            PresenterHighlight "Presenter Highlight" "actions.presenter_highlight" System Star,
+            PresenterMagnify "Presenter Magnifier" "actions.presenter_magnifier" System Search,
+            PresenterTimer "Presenter Timer" "actions.presenter_timer" System Calendar,
+            PresenterRecenter "Recenter Pointer" "actions.recenter_pointer" System Refresh,
+            PresenterStartPresentation "Start Presentation" "actions.start_presentation" System Play,
+            PresenterFastForward "Fast Forward" "actions.fast_forward" System ArrowRight,
+            PresenterFastBackward "Fast Backward" "actions.fast_backward" System ArrowLeft,
+            PresenterBlankScreen "Blank Screen" "actions.blank_screen" System Monitor,
+            PresenterScroll "Presenter Scroll" "actions.presenter_scroll" System ArrowUp,
+            PresenterVolume "Presenter Volume" "actions.presenter_volume" Media Volume,
+            PresenterNext "Presenter Next" "actions.presenter_next" System ArrowRight not_pickable,
+            PresenterBack "Presenter Back" "actions.presenter_back" System ArrowLeft not_pickable,
         }
     };
 }

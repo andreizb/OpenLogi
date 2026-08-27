@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use openlogi_core::config::Config;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{
+    BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, StandaloneDevice,
+};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
@@ -81,6 +83,7 @@ pub(super) fn build_devices(
                 kind: paired.kind,
                 light_capabilities: None,
                 online: paired.online,
+                low_battery: paired.battery.as_ref().is_some_and(battery_needs_alert),
             });
         }
     }
@@ -109,6 +112,7 @@ pub(super) fn build_devices(
             kind: device.kind,
             light_capabilities: device.light_capabilities,
             online: device.online,
+            low_battery: false,
         });
     }
     // Order by the same canonical key the GUI carousel uses, so the
@@ -121,6 +125,13 @@ pub(super) fn build_devices(
             .then_with(|| a.model_key.cmp(&b.model_key))
     });
     devices
+}
+
+/// Whether a battery reading is one the presenter low-battery alert fires on:
+/// low or critical, and actually discharging.
+pub(super) fn battery_needs_alert(battery: &BatteryInfo) -> bool {
+    matches!(battery.level, BatteryLevel::Critical | BatteryLevel::Low)
+        && matches!(battery.status, BatteryStatus::Discharging)
 }
 
 pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitchLink> {

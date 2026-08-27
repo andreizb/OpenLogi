@@ -3,13 +3,15 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, InteractiveElement, IntoElement, ParentElement, Role, StatefulInteractiveElement as _,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    svg,
 };
-use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category, GestureDirection};
+use gpui_component::{Icon, IconName, Selectable as _, h_flex, popover::PopoverState, v_flex};
+use openlogi_core::binding::{Action, ButtonId, Category, GestureDirection};
 
 use crate::ui::action::localized_action_label;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
@@ -61,7 +63,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     match action {
         Action::None => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
-        Action::MiddleClick => "action-icons/mouse.svg",
+        Action::MiddleClick | Action::PresenterPointer => "action-icons/mouse.svg",
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
         Action::Copy => "action-icons/copy.svg",
@@ -70,7 +72,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::Undo => "action-icons/undo-2.svg",
         Action::Redo => "action-icons/redo-2.svg",
         Action::SelectAll | Action::Workflow(_) => "action-icons/list-checks.svg",
-        Action::Find => "action-icons/search.svg",
+        Action::Find | Action::PresenterMagnify => "action-icons/search.svg",
         Action::Save => "action-icons/save.svg",
         Action::BrowserBack => "action-icons/arrow-left.svg",
         Action::BrowserForward => "action-icons/arrow-right.svg",
@@ -84,23 +86,30 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::AppExpose => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
-        Action::ShowDesktop => "action-icons/monitor.svg",
+        Action::ShowDesktop | Action::PresenterBlankScreen => "action-icons/monitor.svg",
         Action::LaunchpadShow | Action::OpenApplication(_) => "action-icons/grid-3x3.svg",
         Action::LockScreen => "action-icons/lock.svg",
         Action::Screenshot | Action::CaptureRegion => "action-icons/camera.svg",
         Action::Sleep => "action-icons/moon.svg",
-        Action::PlayPause => "action-icons/play.svg",
-        Action::NextTrack => "action-icons/skip-forward.svg",
-        Action::PrevTrack => "action-icons/skip-back.svg",
-        Action::VolumeUp => "action-icons/volume-2.svg",
+        Action::PlayPause | Action::PresenterStartPresentation => "action-icons/play.svg",
+        Action::NextTrack | Action::PresenterFastForward | Action::PresenterNext => {
+            "action-icons/skip-forward.svg"
+        }
+        Action::PrevTrack | Action::PresenterFastBackward | Action::PresenterBack => {
+            "action-icons/skip-back.svg"
+        }
+        Action::VolumeUp | Action::PresenterVolume => "action-icons/volume-2.svg",
         Action::VolumeDown => "action-icons/volume-1.svg",
         Action::MuteVolume => "action-icons/volume-x.svg",
         Action::CycleDpiPresets | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
-        Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
+        Action::ToggleSmartShift | Action::PresenterRecenter => "action-icons/refresh-cw.svg",
         Action::ScrollUp => "action-icons/chevrons-up.svg",
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
+        Action::PresenterHighlight => "action-icons/star.svg",
+        Action::PresenterTimer => "action-icons/calendar.svg",
+        Action::PresenterScroll => "action-icons/scroll-text.svg",
         Action::CustomShortcut(_) | Action::HoldShortcut(_) | Action::TypeText(_) => {
             "action-icons/keyboard.svg"
         }
@@ -191,6 +200,48 @@ pub(crate) fn action_rows_matching(
         );
     }
     sections
+}
+
+/// Build the complete action catalog for one Spotlight control. Presenter
+/// controls share the normal action vocabulary, but are kept outside the
+/// mouse silhouette and write through the open profile scope.
+pub(crate) fn presenter_action_picker<T: 'static>(
+    button: ButtonId,
+    profile: Option<String>,
+    observer: &Entity<T>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let current = AppState::try_read(cx).and_then(|state| {
+        state
+            .presenter_bindings_for_profile(profile.as_deref())
+            .get(&button)
+            .cloned()
+    });
+    let observer = observer.clone();
+    let popover = cx.entity().downgrade();
+    let on_pick: PickFn = Rc::new(move |action, window, cx| {
+        AppState::update(cx, |state, cx| {
+            let key = state.current_record().map(DeviceRecord::device_key);
+            state.commit_presenter_binding_for(profile.as_deref(), button, action);
+            if let Some(key) = key {
+                cx.emit(StateEvent::PresenterChanged(key));
+            }
+        });
+        observer.update(cx, |_, cx| cx.notify());
+        if let Some(popover) = popover.upgrade() {
+            popover.update(cx, |state, cx| state.dismiss(window, cx));
+        }
+    });
+    let pal = crate::ui::theme::palette(cx);
+    compact_panel(pal)
+        .min_w(px(220.))
+        .child(title(tr!("Bind %{name}", name => tr!(button.label())), pal))
+        .child(divider(pal))
+        .child(editor_scroll_list(
+            "presenter-picker-scroll",
+            action_rows("presenter-action-item", current.as_ref(), &on_pick, pal),
+        ))
+        .into_any_element()
 }
 
 /// Shared card surface for compact binding panels and menus.

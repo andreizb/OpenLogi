@@ -54,6 +54,20 @@ pub(super) fn execute(action: &Action) {
     }
 }
 
+/// Linux compositors do not expose one universal pointer-warp API.
+pub(super) fn recenter_pointer() {
+    tracing::debug!("presenter pointer recenter is unavailable on Linux");
+}
+
+/// Apply one relative presenter-motion sample through uinput.
+pub(super) fn move_pointer_by(dx: i32, dy: i32) {
+    emit(&[
+        rel_ev(RelativeAxisCode::REL_X, dx),
+        rel_ev(RelativeAxisCode::REL_Y, dy),
+        syn(),
+    ]);
+}
+
 fn mouse_button_code(button: MouseButton) -> KeyCode {
     match button {
         MouseButton::Left => KeyCode::BTN_LEFT,
@@ -253,6 +267,8 @@ fn build() -> io::Result<VirtualDevice> {
     // pointer-grabbing X11 clients or routed oddly by some Wayland compositors.
     let mut axes = AttributeSet::<RelativeAxisCode>::default();
     for a in [
+        RelativeAxisCode::REL_X,
+        RelativeAxisCode::REL_Y,
         RelativeAxisCode::REL_WHEEL,
         RelativeAxisCode::REL_HWHEEL,
         RelativeAxisCode::REL_WHEEL_HI_RES,

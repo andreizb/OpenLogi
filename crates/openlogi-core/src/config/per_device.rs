@@ -15,7 +15,7 @@ use super::{
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::Dpi;
+use crate::hid::{Dpi, PresenterSettings};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -98,6 +98,22 @@ impl Config {
             .action_ring
             .default
             .set_icon(slot, icon);
+    }
+
+    /// Host-rendered Spotlight settings for `device_key`.
+    #[must_use]
+    pub fn presenter(&self, device_key: &str) -> PresenterSettings {
+        self.devices
+            .get(device_key)
+            .map_or_else(PresenterSettings::default, |device| device.presenter)
+    }
+
+    /// Replace the host-rendered Spotlight settings for `device_key`.
+    pub fn set_presenter(&mut self, device_key: &str, settings: PresenterSettings) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .presenter = settings;
     }
 
     /// The ordered DPI preset list for `device_key`, or an empty `Vec` if the

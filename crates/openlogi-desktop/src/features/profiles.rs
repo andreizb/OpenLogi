@@ -114,6 +114,51 @@ pub(crate) fn button_profile_scope_bar(
     ))
 }
 
+/// Build the Spotlight workspace's profile selector.
+pub(crate) fn presenter_profile_scope_bar(
+    icons: &ProfileIconCache,
+    catalog: &Entity<AppCatalogPicker>,
+    cx: &mut App,
+) -> Option<ProfileScopeShell> {
+    let state = AppState::try_read(cx)?;
+    if !state.current_device_is_persistent() {
+        return None;
+    }
+    let editing_app = state.editing_app().map(str::to_string);
+    let profiles: Vec<ProfileChoice> = state
+        .app_profiles()
+        .map(|(app, override_count)| ProfileChoice {
+            app: app.to_string(),
+            name: state
+                .recent_app_name(app)
+                .map_or_else(|| friendly_app_name(app), str::to_string),
+            override_count,
+            persisted: true,
+        })
+        .collect();
+    let recent_apps: Vec<(String, String)> = state
+        .recent_apps()
+        .map(|(app, name)| (app.to_string(), name.to_string()))
+        .collect();
+    let model = profile_scope_model(editing_app, profiles, &recent_apps, catalog, cx);
+    let actions = ProfileScopeActions::new(
+        |app, cx| {
+            AppState::update_bindings(cx, |state| {
+                state.set_editing_app(app);
+            });
+        },
+        |profile, window, cx| open_presenter_remove_confirmation(window, cx, &profile),
+    );
+
+    Some(ProfileScopeShell::new(
+        "presenter-profile",
+        model,
+        catalog.clone(),
+        icons.clone(),
+        actions,
+    ))
+}
+
 /// Build the Actions Ring workspace's independent profile selector.
 pub(crate) fn action_ring_profile_scope_bar(
     icons: &ProfileIconCache,
@@ -324,6 +369,27 @@ fn open_action_ring_remove_confirmation(
             )
             .on_ok(move |_event, _window, cx| {
                 AppState::apply(cx, AppState::remove_editing_action_ring_profile);
+                true
+            })
+    });
+}
+
+fn open_presenter_remove_confirmation(window: &mut Window, cx: &mut App, profile: &ProfileChoice) {
+    let question = remove_profile_question(profile);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert
+            .title(question.clone())
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(tr!("Remove profile"))
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text(tr!("Cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_event, _window, cx| {
+                AppState::update_bindings(cx, |state| {
+                    state.remove_editing_app_profile();
+                });
                 true
             })
     });

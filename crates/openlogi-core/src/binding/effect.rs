@@ -266,6 +266,19 @@ impl Action {
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::ShowActionsRing
+            | Action::PresenterPointer
+            | Action::PresenterHighlight
+            | Action::PresenterMagnify
+            | Action::PresenterTimer
+            | Action::PresenterRecenter
+            | Action::PresenterStartPresentation
+            | Action::PresenterFastForward
+            | Action::PresenterFastBackward
+            | Action::PresenterBlankScreen
+            | Action::PresenterScroll
+            | Action::PresenterVolume
+            | Action::PresenterNext
+            | Action::PresenterBack
             | Action::OpenApplication(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },

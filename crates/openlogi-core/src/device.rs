@@ -134,6 +134,12 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
+    /// A reprogrammable presenter control was found in the device's HID++
+    /// `0x1b04` table. This is discovered from task IDs rather than a product
+    /// allow-list, so original Spotlight, Spotlight 2, and compatible future
+    /// presenters share the same configuration surface.
+    #[serde(default)]
+    pub presenter_controls: bool,
 }
 
 impl Capabilities {
@@ -154,9 +160,13 @@ impl Capabilities {
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
             thumbwheel: ids.contains(&0x2150),
-            haptic_feedback: ids.contains(&0x19b0),
+            // Original Spotlight uses PresenterControl (`0x1a00`) for its
+            // vibration engine; newer peripherals use HapticFeedback
+            // (`0x19b0`). Both are driven by the same Actions Ring API.
+            haptic_feedback: ids.contains(&0x19b0) || ids.contains(&0x1a00),
             haptic_panel: false,
             dpi_gestures: false,
+            presenter_controls: ids.contains(&0x1a00),
         }
     }
 
@@ -178,9 +188,18 @@ impl Capabilities {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                presenter_controls: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
+                ..Self::default()
+            },
+            DeviceKind::Presenter => Self {
+                // Presenter bindings are host-side and opt-in, so retaining
+                // their tab while a sleeping device has no fresh feature
+                // probe is safe and lets the user edit saved mappings.
+                haptic_feedback: true,
+                presenter_controls: true,
                 ..Self::default()
             },
             _ => Self::default(),
@@ -491,6 +510,7 @@ mod tests {
                     haptic_feedback: false,
                     haptic_panel: false,
                     dpi_gestures: false,
+                    presenter_controls: false,
                 }),
             }],
         }
@@ -562,6 +582,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                presenter_controls: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -579,6 +600,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                presenter_controls: false,
             }
         );
         // No driving features → nothing offered.
@@ -633,6 +655,14 @@ mod tests {
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn presumed_capabilities_keep_an_unprobed_presenter_configurable() {
+        let presenter = Capabilities::presumed_from_kind(DeviceKind::Presenter);
+        assert!(presenter.presenter_controls);
+        assert!(presenter.haptic_feedback);
+        assert!(!presenter.buttons && !presenter.pointer && !presenter.lighting);
     }
 
     #[test]

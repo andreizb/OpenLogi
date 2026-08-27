@@ -19,7 +19,7 @@
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
 mod transition;
-
+use std::collections::HashSet;
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -235,6 +235,7 @@ impl Wanted {
                 shutdown_requests,
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
+                low_battery_presenters: HashSet::new(),
                 capture_mouse_events,
             },
         }
@@ -262,6 +263,10 @@ struct Running {
     /// The OS hook, installed once Accessibility is granted and dropped on
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
+    /// Presenter identities already alerted in the current low-battery run.
+    /// Leaving the low state removes the identity so a future transition can
+    /// alert again.
+    low_battery_presenters: HashSet<String>,
     capture_mouse_events: bool,
 }
 
@@ -370,7 +375,7 @@ impl Running {
     }
 
     /// Fold one inventory-watcher event into the orchestrator.
-    async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
+    async fn apply_inventory(&mut self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
             InventoryEvent::Snapshot {
                 inventories,
@@ -380,10 +385,24 @@ impl Running {
                 let mut orchestrator = self.orchestrator.lock().await;
                 orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
+                let alerts = orchestrator.presenter_low_battery_alerts();
                 drop(orchestrator);
+
                 if confirm_settings {
                     refresh.request_settings_confirmation();
                 }
+
+                let current = alerts
+                    .iter()
+                    .map(|(device_key, _, _)| device_key.clone())
+                    .collect::<HashSet<_>>();
+                let presenter = self.inputs.dispatcher.presenter();
+                for (device_key, route, settings) in alerts {
+                    if !self.low_battery_presenters.contains(&device_key) {
+                        presenter.alert_low_battery(route, settings);
+                    }
+                }
+                self.low_battery_presenters = current;
             }
             InventoryEvent::Unavailable => {
                 self.orchestrator.lock().await.mark_inventory_unavailable();

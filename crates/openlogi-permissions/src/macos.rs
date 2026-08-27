@@ -71,6 +71,7 @@ pub fn open_pane(permission: Permission) {
         Permission::InputMonitoring => "Privacy_ListenEvent",
         Permission::Bluetooth => "Privacy_Bluetooth",
         Permission::Camera => "Privacy_Camera",
+        Permission::ScreenRecording => "Privacy_ScreenCapture",
     };
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
     if let Err(e) = opener::open(&url) {

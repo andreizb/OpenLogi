@@ -4,7 +4,7 @@ use std::fmt;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use openlogi_hid::DpiCapabilities;
+use openlogi_hid::{DpiCapabilities, get_dpi_info_on, set_dpi_on};
 
 use crate::cmd::diag::select_device;
 
@@ -25,10 +25,10 @@ pub struct DpiArgs {
 pub async fn run(args: DpiArgs) -> Result<()> {
     // 0x2201 AdjustableDpi / 0x2202 ExtendedAdjustableDpi — auto-skip devices
     // (keyboards) that expose neither. Newer mice ship only 0x2202.
-    let (route, name) = select_device(args.device.as_deref(), &[0x2201, 0x2202]).await?;
+    let (route, name, channel) = select_device(args.device.as_deref(), &[0x2201, 0x2202]).await?;
     println!("device: {name} ({route})");
 
-    let info = openlogi_hid::get_dpi_info(&route)
+    let info = get_dpi_info_on(&channel)
         .await
         .context("read DPI capabilities")?;
     let before = info.current;
@@ -59,13 +59,12 @@ pub async fn run(args: DpiArgs) -> Result<()> {
     }
 
     println!("  writing DPI: {target}");
-    openlogi_hid::set_dpi(&route, target)
-        .await
-        .context("write DPI")?;
+    set_dpi_on(&channel, target).await.context("write DPI")?;
 
-    let after = openlogi_hid::get_dpi(&route)
+    let after = get_dpi_info_on(&channel)
         .await
         .context("read DPI after write")?;
+    let after = after.current;
     println!("  read-back DPI: {after}");
 
     // `target` is always a device-reported value, so a mismatch means the
@@ -87,9 +86,7 @@ pub async fn run(args: DpiArgs) -> Result<()> {
     }
 
     println!("  restoring DPI: {before}");
-    openlogi_hid::set_dpi(&route, before)
-        .await
-        .context("restore DPI")?;
+    set_dpi_on(&channel, before).await.context("restore DPI")?;
 
     println!("✓ DPI round-trip OK");
     Ok(())

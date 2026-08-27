@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use openlogi_hid::read_battery_raw_on;
 
 use crate::cmd::diag::select_device;
 
@@ -21,10 +22,10 @@ pub struct BatteryArgs {
 
 pub async fn run(args: BatteryArgs) -> Result<()> {
     // 0x1004 UnifiedBattery / 0x1000 BatteryStatus — pick a device with either.
-    let (route, name) = select_device(args.device.as_deref(), &[0x1000, 0x1004]).await?;
+    let (route, name, channel) = select_device(args.device.as_deref(), &[0x1000, 0x1004]).await?;
     println!("device: {name} ({route})");
 
-    let line = openlogi_hid::read_battery_raw(&route)
+    let line = read_battery_raw_on(&channel)
         .await
         .context("read battery")?;
     println!("  {line}");

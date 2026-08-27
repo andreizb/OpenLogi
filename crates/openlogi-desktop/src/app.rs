@@ -23,6 +23,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::features::presenter::PresenterControlsView;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
@@ -71,6 +72,8 @@ enum Route {
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
+    /// Spotlight pointer effects, presenter buttons, timer, and haptics.
+    Presenter,
     /// Cursor-centred eight-slot action launcher.
     ActionsRing,
     /// The keyboard function-row remapper with clickable F-key bubbles.
@@ -117,6 +120,9 @@ impl DetailTab {
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
+        if caps.presenter_controls {
+            tabs.push(Self::Presenter);
+        }
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
             tabs.push(Self::ActionsRing);
         }
@@ -148,6 +154,7 @@ impl DetailTab {
     fn label(self) -> gpui::SharedString {
         match self {
             Self::Buttons => tr!("device.buttons"),
+            Self::Presenter => tr!("device.presenter"),
             Self::ActionsRing => tr!("action_ring.actions_ring"),
             Self::Keys => tr!("device.keys"),
             Self::Pointer => tr!("device.pointer"),
@@ -167,6 +174,7 @@ pub struct AppView {
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    presenter_panel: Entity<PresenterControlsView>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
@@ -224,6 +232,7 @@ impl AppView {
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
+        let presenter_panel = cx.new(PresenterControlsView::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
@@ -264,6 +273,7 @@ impl AppView {
                 // language switch already refreshes every window, and the root
                 // caches no localized text.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::PresenterChanged(_)
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
@@ -288,6 +298,7 @@ impl AppView {
             keyboard_model,
             dpi_panel,
             smartshift_panel,
+            presenter_panel,
             lighting_panel,
             camera_preview,
             camera_controls,
@@ -591,6 +602,7 @@ impl Render for AppView {
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        presenter_panel: &self.presenter_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,

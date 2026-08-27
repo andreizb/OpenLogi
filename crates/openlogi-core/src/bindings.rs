@@ -52,11 +52,36 @@ pub fn button_bindings_for(
         .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();
     for (button, mut binding) in stored {
+        if !ButtonId::ALL.contains(&button) {
+            continue;
+        }
         if let Binding::Gesture(map) = &mut binding {
             map.entry(GestureDirection::Click)
                 .or_insert_with(|| default_binding(button));
         }
         bindings.insert(button, binding);
+    }
+    bindings
+}
+
+/// Explicit presenter-control bindings for `config_key`, with the per-app
+/// overlay applied.
+#[must_use]
+pub fn presenter_bindings_for(
+    config: &Config,
+    config_key: Option<&str>,
+    app_bundle: Option<&str>,
+) -> BTreeMap<ButtonId, Binding> {
+    let mut bindings = config_key
+        .map(|key| config.effective_bindings(key, app_bundle))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(button, _)| button.is_presenter_button())
+        .collect::<BTreeMap<_, _>>();
+    for button in ButtonId::PRESENTER_BUTTONS {
+        bindings
+            .entry(button)
+            .or_insert_with(|| Binding::Single(default_binding(button)));
     }
     bindings
 }

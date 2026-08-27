@@ -1,10 +1,11 @@
 //! Platform helpers for synthesising OS-level input events on macOS.
 
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use core_graphics::geometry::CGPoint;
+use core_graphics::geometry::{CGPoint, CGRect};
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
@@ -96,6 +97,91 @@ pub(super) fn execute(action: &Action) {
             );
         }
     }
+}
+
+/// Recenter the pointer on the primary display.
+pub(super) fn recenter_pointer() {
+    let bounds = CGDisplay::main().bounds();
+    let center = CGPoint::new(
+        bounds.origin.x + bounds.size.width / 2.0,
+        bounds.origin.y + bounds.size.height / 2.0,
+    );
+    if let Err(error) = CGDisplay::warp_mouse_cursor_position(center) {
+        tracing::warn!(?error, "could not recenter presenter pointer");
+    }
+}
+
+/// Apply one raw presenter sample from the current visible pointer position.
+pub(super) fn move_pointer_by(dx: i32, dy: i32) {
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for presenter motion");
+        return;
+    };
+    let Ok(state) = CGEvent::new(source.clone()) else {
+        tracing::warn!("CGEvent::new failed for presenter motion");
+        return;
+    };
+    let current = clamp_to_active_displays(state.location());
+    let target = clamp_to_active_displays(CGPoint::new(
+        current.x + f64::from(dx),
+        current.y + f64::from(dy),
+    ));
+    let horizontal_delta = (target.x - current.x).round();
+    let vertical_delta = (target.y - current.y).round();
+    if horizontal_delta == 0.0 && vertical_delta == 0.0 {
+        return;
+    }
+    let Ok(event) =
+        CGEvent::new_mouse_event(source, CGEventType::MouseMoved, target, CGMouseButton::Left)
+    else {
+        tracing::warn!("CGEvent::new_mouse_event failed for presenter motion");
+        return;
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the applied distance is bounded by one display-sized presenter sample"
+    )]
+    {
+        event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, horizontal_delta as i64);
+        event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, vertical_delta as i64);
+    }
+    tag_synthetic(&event);
+    event.post(CGEventTapLocation::HID);
+}
+
+fn clamp_to_active_displays(point: CGPoint) -> CGPoint {
+    let Ok(display_ids) = CGDisplay::active_displays() else {
+        return point;
+    };
+    let bounds: Vec<_> = display_ids
+        .into_iter()
+        .map(|id| CGDisplay::new(id).bounds())
+        .collect();
+    clamp_to_display_union(point, &bounds)
+}
+
+fn clamp_to_display_union(point: CGPoint, displays: &[CGRect]) -> CGPoint {
+    const EDGE_INSET: f64 = 0.5;
+    let mut nearest = point;
+    let mut nearest_distance = f64::INFINITY;
+    for display in displays {
+        let min_x = display.origin.x;
+        let min_y = display.origin.y;
+        let max_x = (display.origin.x + display.size.width - EDGE_INSET).max(min_x);
+        let max_y = (display.origin.y + display.size.height - EDGE_INSET).max(min_y);
+        if point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y {
+            return point;
+        }
+        let candidate = CGPoint::new(point.x.clamp(min_x, max_x), point.y.clamp(min_y, max_y));
+        let distance_x = point.x - candidate.x;
+        let distance_y = point.y - candidate.y;
+        let distance = distance_x.mul_add(distance_x, distance_y * distance_y);
+        if distance < nearest_distance {
+            nearest = candidate;
+            nearest_distance = distance;
+        }
+    }
+    nearest
 }
 
 /// Synthesise a click for `button` at the cursor location. Extra buttons

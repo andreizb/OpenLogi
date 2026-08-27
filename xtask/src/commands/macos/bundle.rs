@@ -42,7 +42,8 @@ impl DistributionTarget {
 }
 
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
-/// local identity is available (dev) or leaving it unsigned (production).
+/// local identity is available. A stable local signature matters for both
+/// channels because macOS TCC grants belong to the signed code identity.
 pub(crate) fn run(channel: Channel) -> Result<()> {
     build_bundle(channel, None, None)
 }
@@ -128,10 +129,9 @@ fn build_bundle(
         (Channel::Production, Some(identity)) => {
             signing::sign_app_with_timestamp(identity, signing::TimestampMode::Secure, channel)?;
         }
-        (Channel::Production, None) => {
-            println!("==> codesign: skipped (unsigned — set {SIGN_IDENTITY_ENV} to sign)");
+        (Channel::Production, None) | (Channel::Dev, _) => {
+            signing::local_sign_app_if_available(channel)?;
         }
-        (Channel::Dev, _) => signing::local_sign_app_if_available(channel)?,
     }
     println!();
     println!("Bundle ready: {}", app.display());

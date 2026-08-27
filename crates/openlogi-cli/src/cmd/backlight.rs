@@ -40,7 +40,8 @@ pub enum BacklightAction {
 }
 
 pub async fn run(args: BacklightArgs) -> Result<()> {
-    let (route, name) = select_device(args.device.as_deref(), &[BACKLIGHT_FEATURE]).await?;
+    let (route, name, _channel) =
+        select_device(args.device.as_deref(), &[BACKLIGHT_FEATURE]).await?;
     println!("device: {name} ({route})");
 
     let enable = match args.action.unwrap_or(BacklightAction::Status) {

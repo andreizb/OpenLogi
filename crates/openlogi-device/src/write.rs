@@ -24,19 +24,22 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod pointer_speed;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
-    dump_firmware_entities, dump_reprog_controls, read_battery_raw,
+    dump_features_on, dump_firmware_entities, dump_firmware_entities_on, dump_reprog_controls,
+    dump_reprog_controls_on, read_battery_raw, read_battery_raw_on,
 };
 pub use dpi::{
-    Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
+    Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, get_dpi_on, set_dpi,
+    set_dpi_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{set_fn_lock, set_fn_lock_on};
-pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
+pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on, play_presenter_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
@@ -52,6 +55,9 @@ pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
+};
+pub use pointer_speed::{
+    get_pointer_speed, get_pointer_speed_on, set_pointer_speed, set_pointer_speed_on,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,

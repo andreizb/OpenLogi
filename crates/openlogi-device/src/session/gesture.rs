@@ -1,7 +1,7 @@
 //! Live control capture for one device: divert the device's gesture sources
 //! (DPI/ModeShift, the MX dedicated gesture button and/or the MX Master 4
-//! haptic panel), and the thumb wheel over HID++ and turn their events
-//! into [`CapturedInput`] the GUI can dispatch.
+//! haptic panel), presenter controls, and the thumb wheel over HID++ and turn
+//! their events into [`CapturedInput`] the agent can dispatch.
 //!
 //! [`run_capture_session`] runs on the HID++ channel inventory already holds
 //! open for one device, enables diversion on whichever of those controls it
@@ -79,6 +79,15 @@ pub enum CapturedInput {
     },
     /// A diverted button's physical up edge.
     ButtonUp(ButtonId),
+    /// Relative motion from a held Spotlight presenter control.
+    PresenterMotion {
+        /// The held presenter control that owns this motion.
+        button: ButtonId,
+        /// Relative horizontal motion.
+        dx: i16,
+        /// Relative vertical motion.
+        dy: i16,
+    },
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
@@ -128,6 +137,81 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
 ];
 
+/// Spotlight-class controls keyed by their stable HID++ task IDs.
+///
+/// CIDs vary between presenter generations, so capture resolves these tasks
+/// against the device's `0x1b04` table before temporarily diverting them.
+pub const PRESENTER_BUTTON_TASKS: [(u16, ButtonId); 6] = [
+    (
+        reprog_controls::task_ids::SW_CUSTOM_HIGHLIGHT.0,
+        ButtonId::PresenterCursor,
+    ),
+    (
+        reprog_controls::task_ids::SWITCH_HIGHLIGHTING.0,
+        ButtonId::PresenterHighlight,
+    ),
+    (
+        reprog_controls::task_ids::KEYBOARD_RIGHT_ARROW.0,
+        ButtonId::PresenterNext,
+    ),
+    (
+        reprog_controls::task_ids::FAST_FORWARD.0,
+        ButtonId::PresenterNextHold,
+    ),
+    (
+        reprog_controls::task_ids::KEYBOARD_LEFT_ARROW.0,
+        ButtonId::PresenterBack,
+    ),
+    (
+        reprog_controls::task_ids::FAST_BACKWARD.0,
+        ButtonId::PresenterBackHold,
+    ),
+];
+
+/// Virtual long-hold controls exposed by the original Spotlight after a
+/// temporary diversion request. They are absent from its queryable control
+/// table, so they are fallbacks for next/back hold motion.
+pub const PRESENTER_HOLD_CIDS: [(u16, ButtonId); 2] = [
+    (0x00da, ButtonId::PresenterNextHold),
+    (0x00dc, ButtonId::PresenterBackHold),
+];
+
+/// The `0x1b04` tasks that map to `button`, since one presenter button can be
+/// reached through more than one task id across generations.
+fn presenter_task_ids_for_button(button: ButtonId) -> Vec<u16> {
+    PRESENTER_BUTTON_TASKS
+        .into_iter()
+        .filter(|&(_, mapped)| mapped == button)
+        .map(|(task_id, _)| task_id)
+        .collect()
+}
+
+#[cfg(test)]
+fn presenter_task_for_button(button: ButtonId) -> Option<u16> {
+    PRESENTER_BUTTON_TASKS
+        .into_iter()
+        .find(|&(_, mapped)| mapped == button)
+        .map(|(task_id, _)| task_id)
+}
+
+/// Whether `button`'s meaning depends on pointer motion, so its control must be
+/// diverted with raw-XY reporting rather than as a plain button.
+fn presenter_button_needs_raw_xy(button: ButtonId) -> bool {
+    matches!(
+        button,
+        ButtonId::PresenterCursor | ButtonId::PresenterNextHold | ButtonId::PresenterBackHold
+    )
+}
+
+/// The virtual hold CID `button` falls back to when the device's control table
+/// does not list one.
+fn presenter_hold_cid(button: ButtonId) -> Option<u16> {
+    PRESENTER_HOLD_CIDS
+        .into_iter()
+        .find(|&(_, mapped)| mapped == button)
+        .map(|(cid, _)| cid)
+}
+
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
@@ -145,6 +229,8 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Presenter buttons to resolve by task and temporarily divert.
+    pub divert_presenter_buttons: Vec<ButtonId>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -210,6 +296,7 @@ impl ArmedCapture for GestureCapture {
             gesture_buttons = armed.gesture_button_cids.len(),
             dpi_buttons = armed.dpi_cids.len(),
             buttons = armed.button_cids.len(),
+            presenter_holds = armed.presenter_hold_cids.len(),
             thumbwheel = armed.thumb.is_some(),
             wake_rearm,
             "control capture active"

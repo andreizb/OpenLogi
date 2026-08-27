@@ -18,7 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, PointerSpeed, ReceiverSelector, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -271,6 +272,46 @@ impl Request for ReadSmartShift {
     }
 }
 
+/// Apply a Spotlight pointer speed now.
+pub struct SetPointerSpeed {
+    pub route: DeviceRoute,
+    pub speed: PointerSpeed,
+}
+
+impl Request for SetPointerSpeed {
+    type Answer = Result<(), WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_pointer_speed(context::current(), self.route.clone(), self.speed)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        log_rejection("pointer speed", outcome);
+    }
+}
+
+/// Read a device's Spotlight pointer speed; the answer goes back over `reply`.
+pub struct ReadPointerSpeed {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<PointerSpeed, WriteError>>,
+}
+
+impl Request for ReadPointerSpeed {
+    type Answer = Result<PointerSpeed, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_pointer_speed(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read `config.toml`.
 ///
 /// The loop holds this one until a connection exists and never answers it
@@ -449,6 +490,8 @@ commands! {
     SetSmartShift,
     ReadDpi,
     ReadSmartShift,
+    SetPointerSpeed,
+    ReadPointerSpeed,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

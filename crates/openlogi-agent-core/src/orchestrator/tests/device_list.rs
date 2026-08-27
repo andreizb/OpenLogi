@@ -23,6 +23,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
             ..openlogi_core::device::LightCapabilities::default()
         }),
         online: true,
+        low_battery: false,
     }
 }
 
@@ -261,4 +262,49 @@ fn runtime_selection_tracks_online_transition_without_device_set_change() {
         false,
     );
     assert_eq!(orchestrator.current_key(), Some(other_key));
+}
+
+#[test]
+fn battery_alert_requires_a_low_discharging_reading() {
+    let reading = |level, status| BatteryInfo {
+        percentage: 10,
+        level,
+        status,
+    };
+
+    assert!(battery_needs_alert(&reading(
+        BatteryLevel::Low,
+        BatteryStatus::Discharging
+    )));
+    assert!(battery_needs_alert(&reading(
+        BatteryLevel::Critical,
+        BatteryStatus::Discharging
+    )));
+    assert!(!battery_needs_alert(&reading(
+        BatteryLevel::Low,
+        BatteryStatus::Charging
+    )));
+    assert!(!battery_needs_alert(&reading(
+        BatteryLevel::Good,
+        BatteryStatus::Discharging
+    )));
+}
+
+#[test]
+fn low_battery_alert_targets_only_presenters() {
+    let mut orchestrator = orchestrator(Config::default());
+    let mut presenter = dev("spotlight", 1, true);
+    presenter.kind = DeviceKind::Presenter;
+    presenter.capabilities = Some(Capabilities {
+        presenter_controls: true,
+        ..Capabilities::default()
+    });
+    presenter.low_battery = true;
+    let mut mouse = dev("mouse", 2, true);
+    mouse.low_battery = true;
+    orchestrator.devices = vec![presenter, mouse];
+
+    let alerts = orchestrator.presenter_low_battery_alerts();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].0, "spotlight");
 }

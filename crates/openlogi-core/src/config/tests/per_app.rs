@@ -69,6 +69,48 @@ fn per_app_binding_removal_prunes_empty_app() {
 }
 
 #[test]
+fn presenter_only_app_profiles_are_listed_and_removed() {
+    let mut cfg = Config::default();
+    let app = "com.apple.Keynote";
+    let settings = PresenterSettings {
+        magnification: 275,
+        ..PresenterSettings::default()
+    };
+
+    cfg.set_per_app_presenter("spotlight", app, Some(settings));
+
+    assert_eq!(cfg.app_profiles("spotlight").collect::<Vec<_>>(), vec![app]);
+    assert_eq!(
+        cfg.effective_presenter("spotlight", Some(app))
+            .magnification,
+        275
+    );
+
+    cfg.remove_app_profile("spotlight", app);
+
+    assert!(cfg.app_profiles("spotlight").next().is_none());
+    assert_eq!(
+        cfg.effective_presenter("spotlight", Some(app)),
+        PresenterSettings::default()
+    );
+}
+
+#[test]
+fn application_profiles_are_deduplicated_across_buttons_and_presenter() {
+    let mut cfg = Config::default();
+    let app = "com.apple.Keynote";
+    cfg.set_per_app_binding(
+        "spotlight",
+        app,
+        ButtonId::PresenterNext,
+        Some(Action::PresenterNext),
+    );
+    cfg.set_per_app_presenter("spotlight", app, Some(PresenterSettings::default()));
+
+    assert_eq!(cfg.app_profiles("spotlight").collect::<Vec<_>>(), vec![app]);
+}
+
+#[test]
 fn windows_exe_selector_matches_versioned_path() {
     let mut cfg = Config::default();
     cfg.set_binding(

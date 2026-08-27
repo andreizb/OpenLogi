@@ -293,6 +293,33 @@ pub fn execute(action: &Action) {
     }
 }
 
+/// Move the pointer to the centre of the primary display.
+pub fn recenter_pointer() {
+    cfg_select! {
+        target_os = "macos" => { macos::recenter_pointer(); }
+        target_os = "windows" => { windows::recenter_pointer(); }
+        target_os = "linux" => { linux::recenter_pointer(); }
+        _ => {}
+    }
+}
+
+/// Move the pointer by one relative presenter-motion sample.
+///
+/// Each platform resolves the sample from the cursor's visible position so
+/// motion clamped at an edge cannot accumulate as invisible overshoot.
+pub fn move_pointer_by(dx: i32, dy: i32) {
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => { macos::move_pointer_by(dx, dy); }
+        target_os = "windows" => { windows::move_pointer_by(dx, dy); }
+        target_os = "linux" => { linux::move_pointer_by(dx, dy); }
+        _ => { let _ = (dx, dy); }
+    }
+}
+
+/// Synthesise the down edge of `combo`, leaving its output held.
 /// One synthetic held chord, released exactly once when dropped.
 ///
 /// Keep this value with the physical press lifecycle. Replacing its chord

@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use openlogi_hid::{ScrollReportingTarget, ScrollResolution, ScrollWheelMode};
+use openlogi_hid::{
+    ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode_on,
+    set_scroll_resolution_on,
+};
 
 use crate::cmd::diag::select_device;
 
@@ -37,10 +40,10 @@ pub struct WheelArgs {
 }
 
 pub async fn run(args: WheelArgs) -> Result<()> {
-    let (route, name) = select_device(args.device.as_deref(), &[0x2121]).await?;
+    let (route, name, channel) = select_device(args.device.as_deref(), &[0x2121]).await?;
     println!("device: {name} ({route})");
 
-    let before = openlogi_hid::get_scroll_wheel_mode(&route)
+    let before = get_scroll_wheel_mode_on(&channel)
         .await
         .context("read HiResWheel mode")?;
     print_mode("current", before);
@@ -49,7 +52,7 @@ pub async fn run(args: WheelArgs) -> Result<()> {
         return Ok(());
     };
 
-    let after = openlogi_hid::set_scroll_resolution(&route, requested)
+    let after = set_scroll_resolution_on(&channel, requested)
         .await
         .context("set wheel resolution")?;
     print_mode("read-back", after);

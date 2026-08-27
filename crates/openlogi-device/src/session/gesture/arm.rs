@@ -36,6 +36,8 @@ pub(super) struct ArmedControls {
     /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
     /// the [`ButtonId`] each dispatches as.
     pub(super) button_cids: Vec<(u16, ButtonId)>,
+    /// Virtual original-Spotlight hold CIDs armed outside its control table.
+    pub(super) presenter_hold_cids: Vec<u16>,
     /// Original reporting state for every diverted `0x1b04` control.
     reporting: Vec<ArmedReporting>,
     /// `0x2150` accessor and the information read while diverting it, present
@@ -83,11 +85,17 @@ impl ArmedControls {
         let Self {
             reprog,
             reporting,
+            presenter_hold_cids,
             thumb,
             ..
         } = self;
-        let reprog =
-            reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
+        let reprog = reprog.and_then(|controls| {
+            ReprogRestore::with_undivert_cids(
+                controls.feature_index(),
+                reporting,
+                presenter_hold_cids,
+            )
+        });
         PendingCaptureRestore::new(
             retired,
             reprog,
@@ -103,13 +111,30 @@ impl ArmedControls {
                     || self
                         .gesture_button_cids
                         .iter()
-                        .any(|&(cid, _)| cid == reporting.cid);
+                        .any(|&(cid, _)| cid == reporting.cid)
+                    || self.button_cids.iter().any(|&(cid, button)| {
+                        cid == reporting.cid && presenter_button_needs_raw_xy(button)
+                    });
                 let change = divert_change(reporting.original, raw_xy);
                 if let Err(error) = rc.set_cid_reporting_full(reporting.cid, change).await {
                     warn!(
                         cid = format_args!("{:#06x}", reporting.cid),
                         ?error,
                         "re-divert after wake failed"
+                    );
+                }
+            }
+            for &cid in &self.presenter_hold_cids {
+                let change = reprog_controls::CidReportingChange {
+                    diverted: Some(true),
+                    raw_xy: Some(true),
+                    ..Default::default()
+                };
+                if let Err(error) = rc.set_cid_reporting_full(cid, change).await {
+                    warn!(
+                        cid = format_args!("{cid:#06x}"),
+                        ?error,
+                        "re-divert presenter hold control after wake failed"
                     );
                 }
             }
@@ -148,6 +173,7 @@ pub(super) async fn arm_controls(
         && armed.gesture_button_cids.is_empty()
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
+        && armed.presenter_hold_cids.is_empty()
         && armed.thumb.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
@@ -227,6 +253,7 @@ pub(super) async fn arm_controls_into(
                 armed.button_cids.push((cid, button));
             }
         }
+        arm_presenter_controls(&rc, &controls, spec, armed).await?;
     }
 
     if spec.capture_thumbwheel
@@ -255,6 +282,61 @@ pub(super) async fn arm_controls_into(
         });
         if let Some(thumb) = armed.thumb.as_ref() {
             thumb.wheel.divert(thumb.direction()).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Divert the presenter controls `spec` asks for, resolved by `0x1b04` task id
+/// rather than CID: those differ across Spotlight generations.
+///
+/// The original Spotlight does not list its long-hold controls in the queryable
+/// table at all, so a button with no matching task falls back to the virtual
+/// hold CID — a write that simply fails on devices without one.
+async fn arm_presenter_controls(
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    spec: &CaptureSpec,
+    armed: &mut ArmedControls,
+) -> Result<(), CaptureError> {
+    for &button in &spec.divert_presenter_buttons {
+        let task_ids = presenter_task_ids_for_button(button);
+        if task_ids.is_empty() {
+            continue;
+        }
+        let raw_xy = presenter_button_needs_raw_xy(button);
+        let mut found = false;
+        for control in controls.iter().filter(|control| {
+            task_ids.contains(&control.task_id)
+                && control.is_divertable()
+                && (!raw_xy || control.supports_raw_xy())
+        }) {
+            if armed.button_cids.iter().any(|(cid, _)| *cid == control.cid) {
+                continue;
+            }
+            arm_reprog_control(rc, control.cid, raw_xy, &mut armed.reporting).await?;
+            armed.button_cids.push((control.cid, button));
+            found = true;
+        }
+        if !found
+            && let Some(cid) = presenter_hold_cid(button)
+            && !armed
+                .button_cids
+                .iter()
+                .any(|(armed_cid, _)| *armed_cid == cid)
+        {
+            let change = reprog_controls::CidReportingChange {
+                diverted: Some(true),
+                raw_xy: Some(true),
+                ..Default::default()
+            };
+            match rc.set_cid_reporting_full(cid, change).await {
+                Ok(_) => {
+                    armed.presenter_hold_cids.push(cid);
+                    armed.button_cids.push((cid, button));
+                }
+                Err(error) => debug!(?error, cid, %button, "presenter hold CID unavailable"),
+            }
         }
     }
     Ok(())

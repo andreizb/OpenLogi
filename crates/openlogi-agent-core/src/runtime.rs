@@ -21,7 +21,9 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
+use crate::capture_plan::SharedCapturePlans;
 use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
+use crate::presenter::PresenterManager;
 use crate::{DpiCycleState, DpiCycles};
 
 /// Application identity captured with a physical press and retained through
@@ -74,6 +76,8 @@ struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    capture_plans: SharedCapturePlans,
+    presenter: PresenterManager,
 }
 
 impl ActionExecutor {
@@ -90,6 +94,10 @@ impl ActionExecutor {
             {
                 warn!("Actions Ring runtime unavailable — trigger ignored");
             }
+            return;
+        }
+
+        if self.dispatch_presenter_action(action, device_key) {
             return;
         }
 
@@ -164,6 +172,101 @@ impl ActionExecutor {
                 "no DPI presets configured for active device — press ignored"
             );
         }
+    }
+
+    fn dispatch_presenter_action(&self, action: &Action, device_key: Option<&str>) -> bool {
+        match action {
+            Action::PresenterPointer => {
+                self.prepare_presenter(device_key);
+                self.presenter.show_configured();
+            }
+            Action::PresenterHighlight => {
+                self.presenter
+                    .toggle(openlogi_core::hid::PresenterEffect::Highlight);
+            }
+            Action::PresenterMagnify => {
+                self.presenter
+                    .toggle(openlogi_core::hid::PresenterEffect::Magnify);
+            }
+            Action::PresenterTimer => {
+                self.prepare_presenter(device_key);
+                self.presenter.start_configured_timer();
+            }
+            Action::PresenterRecenter => {
+                openlogi_inject::recenter_pointer();
+            }
+            Action::PresenterStartPresentation => {
+                dispatch_presenter_shortcut(presenter_start_shortcut(
+                    openlogi_hook::frontmost_application()
+                        .as_ref()
+                        .map(|app| app.id.as_str()),
+                ));
+            }
+            Action::PresenterBlankScreen => {
+                dispatch_presenter_shortcut("B");
+            }
+            Action::PresenterNext => {
+                self.prepare_presenter(device_key);
+                self.presenter.start_configured_timer_once();
+                dispatch_presenter_shortcut("Right");
+            }
+            Action::PresenterBack => {
+                self.prepare_presenter(device_key);
+                self.presenter.start_configured_timer_once();
+                dispatch_presenter_shortcut("Left");
+            }
+            Action::PresenterFastForward
+            | Action::PresenterFastBackward
+            | Action::PresenterScroll
+            | Action::PresenterVolume => {}
+            _ => return false,
+        }
+        true
+    }
+
+    fn prepare_presenter(&self, device_key: Option<&str>) {
+        let Some(key) = device_key else { return };
+        let plan = self
+            .capture_plans
+            .borrow()
+            .iter()
+            .find(|plan| plan.dispatch.config_key == key)
+            .cloned();
+        if let Some(plan) = plan {
+            self.presenter
+                .set_configured_settings(plan.dispatch.presenter_settings);
+            self.presenter.set_active_route(plan.target.route);
+        }
+    }
+}
+
+fn dispatch_presenter_shortcut(text: &str) {
+    let Ok(combo) = text.parse() else {
+        warn!(text, "invalid built-in presenter shortcut");
+        return;
+    };
+    openlogi_inject::execute(&Action::CustomShortcut(combo));
+}
+
+fn presenter_start_shortcut(frontmost: Option<&str>) -> &'static str {
+    let frontmost = frontmost.unwrap_or_default().to_ascii_lowercase();
+    if frontmost.contains("keynote") {
+        return "Cmd+Alt+P";
+    }
+    if frontmost.contains("powerpoint") || frontmost.contains("powerpnt") {
+        return if cfg!(target_os = "macos") {
+            "Cmd+Enter"
+        } else {
+            "Shift+F5"
+        };
+    }
+    if frontmost.contains("impress") || frontmost.contains("libreoffice") {
+        return "Shift+F5";
+    }
+    if cfg!(target_os = "macos") {
+        "Cmd+Enter"
+    } else {
+        "Ctrl+F5"
     }
 }
 
@@ -242,11 +345,15 @@ impl ActionRuntime {
         dpi_cycle: Arc<RwLock<DpiCycles>>,
         access: DeviceAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        capture_plans: SharedCapturePlans,
     ) -> io::Result<Self> {
+        let presenter = PresenterManager::default();
         let executor = ActionExecutor {
             dpi_cycle,
             access,
             action_ring,
+            capture_plans,
+            presenter,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
@@ -276,6 +383,50 @@ impl ActionDispatcher {
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);
+    }
+
+    /// Presenter overlay state shared with the IPC server.
+    #[must_use]
+    pub fn presenter(&self) -> PresenterManager {
+        self.executor.presenter.clone()
+    }
+
+    /// Handle a Spotlight control whose meaning depends on another held button.
+    /// Returns `true` when the presenter runtime consumed the down edge.
+    pub(crate) fn presenter_button_down(&self, button: ButtonId, device_key: Option<&str>) -> bool {
+        match button {
+            ButtonId::PresenterCursor => {
+                self.executor.prepare_presenter(device_key);
+                if self.executor.presenter.should_recenter() {
+                    openlogi_inject::recenter_pointer();
+                }
+                self.executor.presenter.pointer_pressed();
+                true
+            }
+            ButtonId::PresenterHighlight => {
+                self.executor.presenter.cycle_forward();
+                true
+            }
+            ButtonId::PresenterNext if self.executor.presenter.pointer_is_held() => {
+                self.executor.presenter.cycle_forward();
+                true
+            }
+            ButtonId::PresenterBack if self.executor.presenter.pointer_is_held() => {
+                self.executor.presenter.cycle_backward();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Finish a physical Spotlight pointer-button hold.
+    pub(crate) fn presenter_button_up(&self, button: ButtonId) -> bool {
+        if button != ButtonId::PresenterCursor {
+            return false;
+        }
+        let cursor = openlogi_hook::cursor_position().map(|position| (position.x, position.y));
+        self.executor.presenter.pointer_released(cursor);
+        true
     }
 
     /// Queue one OS-hook down edge without blocking the callback. The returned

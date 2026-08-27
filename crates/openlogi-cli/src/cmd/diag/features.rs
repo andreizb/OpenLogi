@@ -8,51 +8,48 @@ use std::fmt;
 
 use anyhow::Result;
 use clap::Args;
-use openlogi_hid::{DeviceRoute, FeatureType, FirmwareEntity};
+use openlogi_hid::{FeatureType, FirmwareEntity, dump_features_on, dump_firmware_entities_on};
+
+use crate::cmd::diag::online_devices;
 
 #[derive(Debug, Args)]
 pub struct FeaturesArgs {}
 
 pub async fn run(_args: FeaturesArgs) -> Result<()> {
-    let inventories = openlogi_hid::enumerate().await?;
+    let devices = online_devices().await?;
     let mut any = false;
-    for inv in &inventories {
-        for paired in inv.paired.iter().filter(|p| p.online) {
-            any = true;
-            let route = DeviceRoute::for_slot(inv, paired.slot).unwrap_or(DeviceRoute::Direct {
-                vendor_id: inv.receiver.vendor_id,
-                product_id: inv.receiver.product_id,
-            });
-            match paired.codename.as_deref() {
-                Some(name) => println!("device: {name} ({route})"),
-                None => println!("device: Slot {} ({route})", paired.slot),
-            }
-            match openlogi_hid::dump_features(&route).await {
-                Ok(entries) => {
-                    println!("  {:>4}  {:>6}  {:<4}  flags", "idx", "id", "ver");
-                    for (idx, entry) in entries.iter().enumerate() {
-                        println!(
-                            "  {:>4}  0x{:04x}  v{:<3}  {}",
-                            idx,
-                            entry.id,
-                            entry.version,
-                            FeatureFlagsDisplay(entry.typ)
-                        );
-                    }
-                    println!("  ({} feature entries)\n", entries.len());
+    for device in devices {
+        let Some(channel) = device.channel.as_ref() else {
+            continue;
+        };
+        any = true;
+        let route = &device.route;
+        println!("device: {} ({route})", device.name);
+        match dump_features_on(channel).await {
+            Ok(entries) => {
+                println!("  {:>4}  {:>6}  {:<4}  flags", "idx", "id", "ver");
+                for (idx, entry) in entries.iter().enumerate() {
+                    println!(
+                        "  {:>4}  0x{:04x}  v{:<3}  {}",
+                        idx,
+                        entry.id,
+                        entry.version,
+                        FeatureFlagsDisplay(entry.typ)
+                    );
                 }
-                Err(e) => println!("  dump failed: {e:#}\n"),
+                println!("  ({} feature entries)\n", entries.len());
             }
-            match openlogi_hid::dump_firmware_entities(&route).await {
-                Ok(entries) => {
-                    for entry in &entries {
-                        println!("  {}", FirmwareEntityDisplay(entry));
-                    }
-                }
-                Err(e) => println!("  firmware dump failed: {e:#}"),
-            }
-            println!();
+            Err(e) => println!("  dump failed: {e:#}\n"),
         }
+        match dump_firmware_entities_on(channel).await {
+            Ok(entries) => {
+                for entry in &entries {
+                    println!("  {}", FirmwareEntityDisplay(entry));
+                }
+            }
+            Err(e) => println!("  firmware dump failed: {e:#}"),
+        }
+        println!();
     }
     if !any {
         println!("no online HID++ devices found");

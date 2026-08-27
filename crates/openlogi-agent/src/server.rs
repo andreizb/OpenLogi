@@ -13,10 +13,12 @@ use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
+use openlogi_agent_core::presenter::PresenterHapticRequest;
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::{PointerSpeed, PresenterSettings};
 use openlogi_hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand,
     ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
@@ -25,7 +27,7 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate, RingObservation,
+    PairingCommandError, PairingUpdate, PresenterObservation, RingObservation,
 };
 use succession::Compat;
 
@@ -70,6 +72,23 @@ impl AgentServer {
         dispatcher: ActionDispatcher,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
+        let presenter = dispatcher.presenter();
+        let (presenter_haptics, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        presenter.set_haptic_sender(presenter_haptics);
+        let presenter_shared = shared.clone();
+        tokio::spawn(async move {
+            while let Some(PresenterHapticRequest { route, intensity }) = requests.recv().await {
+                let result = presenter_shared
+                    .device(&route)
+                    .run(HidppOperation::PlayHaptic, |channel| async move {
+                        openlogi_hid::play_presenter_haptic_on(&channel, intensity).await
+                    })
+                    .await;
+                if let Err(error) = result {
+                    warn!(%error, "presenter vibration failed");
+                }
+            }
+        });
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
         (
             Self {
@@ -215,6 +234,19 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn read_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadPointerSpeed, |channel| async move {
+                openlogi_hid::get_pointer_speed_on(&channel).await
+            })
+            .await
+    }
+
     async fn read_backlight(
         self,
         _: Context,
@@ -226,6 +258,36 @@ impl Agent for AgentServer {
                 openlogi_hid::get_backlight_on(&c).await
             })
             .await
+    }
+
+    async fn set_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WritePointerSpeed, |channel| async move {
+                openlogi_hid::set_pointer_speed_on(&channel, speed).await
+            })
+            .await
+    }
+
+    async fn observe_presenter(self, _: Context, since: Generation) -> PresenterObservation {
+        self.dispatcher.presenter().observe(since).await
+    }
+
+    async fn set_presenter_settings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        settings: PresenterSettings,
+    ) -> Result<(), WriteError> {
+        let presenter = self.dispatcher.presenter();
+        presenter.set_active_route(route);
+        presenter.set_configured_settings(settings);
+        Ok(())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
