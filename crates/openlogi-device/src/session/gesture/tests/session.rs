@@ -288,3 +288,35 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
         CaptureStop::ChannelChanged
     ));
 }
+
+#[tokio::test]
+async fn pending_restore_undiverts_a_virtual_presenter_hold_control() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb503,
+    };
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(channel, route);
+    let hold_cid = PRESENTER_HOLD_CIDS[0].0;
+    let pending = PendingCaptureRestore::new(
+        &shared,
+        ReprogRestore::with_undivert_cids(0x22, Vec::new(), vec![hold_cid]),
+        None,
+    )
+    .expect("a virtual presenter hold control should require restoration");
+
+    assert!(matches!(
+        pending.restore_standalone(&shared).await,
+        CaptureSessionOutcome::Restored
+    ));
+    let reports = handle.written_reports();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0][2], 0x22, "restore must address ReprogControlsV4");
+    assert_eq!(reports[0][3] >> 4, 3, "restore must call setCidReporting");
+    assert_eq!(
+        &reports[0][4..7],
+        &[hold_cid.to_be_bytes()[0], hold_cid.to_be_bytes()[1], 0x22],
+        "restore must clear diversion and raw-XY on the virtual hold CID"
+    );
+}

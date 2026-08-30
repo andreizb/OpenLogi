@@ -60,16 +60,23 @@ pub(crate) struct ArmedReporting {
 /// A non-empty set of `0x1b04` controls owned through one feature index.
 pub(crate) struct ReprogRestore {
     feature_index: u8,
-    controls: Vec<ArmedReporting>,
-    undivert_cids: Vec<u16>,
+    items: Vec<ReprogRestoreItem>,
+}
+
+#[derive(Clone, Copy)]
+enum ReprogRestoreItem {
+    Reporting(ArmedReporting),
+    Undivert(u16),
 }
 
 impl ReprogRestore {
     pub(crate) fn new(feature_index: u8, controls: Vec<ArmedReporting>) -> Option<Self> {
-        (!controls.is_empty()).then_some(Self {
+        (!controls.is_empty()).then(|| Self {
             feature_index,
-            controls,
-            undivert_cids: Vec::new(),
+            items: controls
+                .into_iter()
+                .map(ReprogRestoreItem::Reporting)
+                .collect(),
         })
     }
 
@@ -78,10 +85,13 @@ impl ReprogRestore {
         controls: Vec<ArmedReporting>,
         undivert_cids: Vec<u16>,
     ) -> Option<Self> {
-        (!controls.is_empty() || !undivert_cids.is_empty()).then_some(Self {
+        (!controls.is_empty() || !undivert_cids.is_empty()).then(|| Self {
             feature_index,
-            controls,
-            undivert_cids,
+            items: controls
+                .into_iter()
+                .map(ReprogRestoreItem::Reporting)
+                .chain(undivert_cids.into_iter().map(ReprogRestoreItem::Undivert))
+                .collect(),
         })
     }
 }
@@ -108,9 +118,7 @@ impl fmt::Debug for CaptureRestorePlan {
         f.debug_struct("CaptureRestorePlan")
             .field(
                 "reporting_count",
-                &self.reprog.as_ref().map_or(0, |reprog| {
-                    reprog.controls.len() + reprog.undivert_cids.len()
-                }),
+                &self.reprog.as_ref().map_or(0, |reprog| reprog.items.len()),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
             .finish()
@@ -125,12 +133,15 @@ impl RestorePlan for CaptureRestorePlan {
         if let Some(reprog) = &self.reprog {
             let controls =
                 ReprogControlsV4::new(channel.clone(), device_index, reprog.feature_index);
-            for &reporting in &reprog.controls {
-                restored &= restore_reporting(&controls, reporting, "captured control").await;
-            }
-            for &cid in &reprog.undivert_cids {
-                restored &=
-                    restore_result(controls.undivert_cid(cid).await, "presenter hold control");
+            for &item in &reprog.items {
+                restored &= match item {
+                    ReprogRestoreItem::Reporting(reporting) => {
+                        restore_reporting(&controls, reporting, "captured control").await
+                    }
+                    ReprogRestoreItem::Undivert(cid) => {
+                        restore_result(controls.undivert_cid(cid).await, "presenter hold control")
+                    }
+                };
             }
         }
         if let Some(feature_index) = self.thumb_index {
