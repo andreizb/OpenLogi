@@ -492,11 +492,13 @@ impl Orchestrator {
                     &self.config,
                     physical_key,
                     &dev.config_key,
-                    presenter_controls,
+                    crate::capture_plan::CaptureAvailability::new(
+                        presenter_controls,
+                        self.os_mouse_hook_available,
+                    ),
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,
-                    self.os_mouse_hook_available,
                 ))
             })
             .collect()

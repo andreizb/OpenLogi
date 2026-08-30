@@ -83,6 +83,26 @@ pub struct DeviceCapturePlan {
 /// Read-only, lossless, coalescing view of the latest capture-plan snapshot.
 pub type SharedCapturePlans = watch::Receiver<Arc<Vec<DeviceCapturePlan>>>;
 
+/// Runtime capture paths available for one device when its plan is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureAvailability {
+    /// Whether inventory found Spotlight presenter controls on this device.
+    pub presenter_controls: bool,
+    /// Whether the host mouse hook can own ordinary side-button input.
+    pub os_mouse_hook: bool,
+}
+
+impl CaptureAvailability {
+    /// Describe the capture paths available for one device.
+    #[must_use]
+    pub const fn new(presenter_controls: bool, os_mouse_hook: bool) -> Self {
+        Self {
+            presenter_controls,
+            os_mouse_hook,
+        }
+    }
+}
+
 /// Back/Forward gesture maps that macOS must own through device-specific HID++
 /// capture because Bluetooth-direct CGEvents may carry no sender identity.
 #[must_use]
@@ -106,14 +126,13 @@ pub fn plan_for_device(
     config: &Config,
     physical_key: PhysicalDeviceKey,
     config_key: &str,
-    presenter_controls: bool,
+    availability: CaptureAvailability,
     route: DeviceRoute,
     app: Option<&str>,
     rearm_generation: u64,
-    os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
     let mut bindings = button_bindings_for(config, Some(config_key), app);
-    let presenter_bindings = if presenter_controls {
+    let presenter_bindings = if availability.presenter_controls {
         presenter_bindings_for(config, Some(config_key), app)
     } else {
         BTreeMap::new()
@@ -131,7 +150,7 @@ pub fn plan_for_device(
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
     let mut divert_gesture_buttons = Vec::new();
-    if os_mouse_hook_available {
+    if availability.os_mouse_hook {
         divert_gesture_buttons.extend(
             DIVERTABLE_STANDARD_BUTTONS
                 .into_iter()
@@ -247,11 +266,10 @@ mod tests {
             PhysicalDeviceKey::parse("receiver:cafe:slot:2")
                 .expect("fixture should be a physical key"),
             config_key,
-            false,
+            CaptureAvailability::new(false, os_mouse_hook_available),
             route,
             app,
             rearm_generation,
-            os_mouse_hook_available,
         )
     }
 

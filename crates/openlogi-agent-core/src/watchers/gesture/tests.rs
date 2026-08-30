@@ -26,11 +26,10 @@ fn plan() -> DeviceCapturePlan {
         &openlogi_core::config::Config::default(),
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     )
 }
 
@@ -404,11 +403,10 @@ fn capture_target_changes_schedule_the_old_session_for_retirement() {
         &openlogi_core::config::Config::default(),
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         session.target().route.clone(),
         None,
         0,
-        true,
     );
     assert_eq!(session.target(), &plan.target);
 
@@ -459,11 +457,10 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     let mut session = live_session_from_plan(7, first.clone());
 
@@ -476,11 +473,10 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     assert_eq!(first.target, rebound.target);
     assert_eq!(
@@ -501,11 +497,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     let mut session = live_session_from_plan(7, first.clone());
 
@@ -519,11 +514,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     assert_eq!(first.target, gestured.target);
     assert_eq!(
@@ -548,11 +542,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     let mut session = live_session_from_plan(8, base.clone());
     config.set_per_app_binding(
@@ -565,11 +558,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         Some("com.example.Editor"),
         0,
-        true,
     );
     assert_eq!(base.target, per_app.target);
     assert_eq!(
@@ -594,11 +586,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     let mut session = live_session_from_plan(7, first.clone());
 
@@ -611,11 +602,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     assert_eq!(
         first.target, rebound.target,
@@ -633,11 +623,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         &config,
         physical_key(),
         "mouse-a",
-        false,
+        crate::capture_plan::CaptureAvailability::new(false, true),
         route(),
         None,
         0,
-        true,
     );
     assert_eq!(rebound.target, rescaled.target);
     assert_eq!(
