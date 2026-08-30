@@ -202,6 +202,21 @@ impl Focusable for AppView {
     }
 }
 
+fn log_initial_selection(state: &AppState) {
+    if let Some(record) = state.current_record() {
+        info!(
+            device_key = %record.config_key,
+            display = %record.display_name,
+            "initial device selected"
+        );
+    } else {
+        info!(
+            root = ?user_cache_root(),
+            "no devices with HID++ model info — using synthetic silhouette"
+        );
+    }
+}
+
 impl AppView {
     /// Construct the root view and its child entities.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -211,21 +226,7 @@ impl AppView {
         // sender) before any window opens, so there is no fallback state here.
 
         let state = AppState::global(cx);
-        {
-            let state = state.read(cx);
-            if let Some(record) = state.current_record() {
-                info!(
-                    device_key = %record.config_key,
-                    display = %record.display_name,
-                    "initial device selected"
-                );
-            } else {
-                info!(
-                    root = ?user_cache_root(),
-                    "no devices with HID++ model info — using synthetic silhouette"
-                );
-            }
-        }
+        log_initial_selection(state.read(cx));
 
         let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
         let action_ring_panel = cx.new(ActionRingPanel::new);
