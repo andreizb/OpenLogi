@@ -621,7 +621,6 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
     }
 }
 
-
 /// `launch_at_login` mirrors the config file so the Settings toggle round-trips
 /// (the GUI saves config.toml, calls `reload_config`, then expects the next
 /// snapshot to agree). Everything else is scripted green.

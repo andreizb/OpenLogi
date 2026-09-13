@@ -10,8 +10,8 @@ use gpui::{
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, popover::PopoverState, v_flex};
 use openlogi_core::binding::{Action, ButtonId, Category, GestureDirection};
 
-use crate::ui::action::localized_action_label;
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
@@ -235,7 +235,10 @@ pub(crate) fn presenter_action_picker<T: 'static>(
     let pal = crate::ui::theme::palette(cx);
     compact_panel(pal)
         .min_w(px(220.))
-        .child(title(tr!("Bind %{name}", name => tr!(button.label())), pal))
+        .child(title(
+            tr!("actions.bind_control", name => tr!(button.translation_key())),
+            pal,
+        ))
         .child(divider(pal))
         .child(editor_scroll_list(
             "presenter-picker-scroll",

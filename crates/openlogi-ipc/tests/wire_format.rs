@@ -41,10 +41,10 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
-    DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError, PointerSpeed,
-    PresenterEffect, PresenterSettings,
+    DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, PointerSpeed,
+    PresenterEffect, PresenterSettings, ReceiverSelector, ScrollReportingTarget, ScrollWheelMode,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -220,22 +220,22 @@ fn assert_presenter_request_variant_order() {
     };
     assert_wire(
         &AgentRequest::ReadPointerSpeed { route: route() },
-        "1a02fb6d04fb03b5",
+        "1c02fb6d04fb03b5",
     );
     assert_wire(
         &AgentRequest::SetPointerSpeed {
             route: route(),
             speed: PointerSpeed::new(4).expect("valid pointer speed"),
         },
-        "1b02fb6d04fb03b504",
+        "1d02fb6d04fb03b504",
     );
-    assert_wire(&AgentRequest::ObservePresenter { since: 7 }, "1c07");
+    assert_wire(&AgentRequest::ObservePresenter { since: 7 }, "1e07");
     assert_wire(
         &AgentRequest::SetPresenterSettings {
             route: route(),
             settings: PresenterSettings::default(),
         },
-        "1d02fb6d04fb03b50107010200000001013200010064648c6ec80666663362333006666666666666",
+        "1f02fb6d04fb03b50107010200000001013200010064648c6ec80666663362333006666666666666",
     );
 }
 

@@ -381,9 +381,9 @@ fn open_presenter_remove_confirmation(window: &mut Window, cx: &mut App, profile
             .title(question.clone())
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text(tr!("Remove profile"))
+                    .ok_text(tr!("profiles.remove_profile"))
                     .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("Cancel"))
+                    .cancel_text(tr!("common.cancel"))
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {

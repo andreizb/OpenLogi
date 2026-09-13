@@ -1311,7 +1311,7 @@ fn presenter_control_row(
     view: &Entity<PresenterControlsView>,
     pal: Palette,
 ) -> impl IntoElement {
-    let name = tr!(button.label()).to_string();
+    let name = tr!(button.translation_key()).to_string();
     let value = action.map_or_else(|| "Device default".to_string(), Action::label);
     let picker_view = view.clone();
     h_flex()

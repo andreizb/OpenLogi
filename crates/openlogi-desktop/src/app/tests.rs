@@ -188,6 +188,7 @@ fn tabs_follow_capabilities_not_kind() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        presenter_controls: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -211,6 +212,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        presenter_controls: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -232,6 +234,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        presenter_controls: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
@@ -275,6 +278,12 @@ fn unprobed_mouse_falls_back_to_presumed_capabilities() {
     assert!(tabs.contains(&DetailTab::Buttons));
     assert!(tabs.contains(&DetailTab::Pointer));
     assert!(!tabs.contains(&DetailTab::Lighting));
+}
+
+#[test]
+fn unprobed_presenter_keeps_its_presenter_tab() {
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Presenter, None));
+    assert_eq!(tabs, vec![DetailTab::Presenter, DetailTab::Device]);
 }
 
 /// An unprobed, unidentified device presumes nothing — only the info tab,

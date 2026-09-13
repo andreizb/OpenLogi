@@ -190,9 +190,14 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             receiver_access: access.clone(),
             device_io,
         };
-        let mut actions =
-            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
-                .unwrap();
+        let (_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
+        let mut actions = crate::runtime::ActionRuntime::new(
+            Arc::default(),
+            device_access.clone(),
+            ring,
+            capture_plans,
+        )
+        .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();
         let mut manager = std::pin::pin!(manage(KeyboardManagerContext {
             spec,

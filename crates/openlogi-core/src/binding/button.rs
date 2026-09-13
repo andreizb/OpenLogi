@@ -251,6 +251,12 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::PresenterCursor => "actions.presenter_cursor_button",
+            ButtonId::PresenterHighlight => "actions.presenter_highlight_button",
+            ButtonId::PresenterNext => "actions.presenter_next_button",
+            ButtonId::PresenterNextHold => "actions.presenter_next_hold_button",
+            ButtonId::PresenterBack => "actions.presenter_back_button",
+            ButtonId::PresenterBackHold => "actions.presenter_back_hold_button",
         }
     }
 }

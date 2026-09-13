@@ -9,7 +9,7 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    PointerSpeed, PresenterSettings, ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -20,6 +20,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
     Observation, PROTOCOL_VERSION, PairingCommandError, PairingPhase, PairingUpdate,
+    PresenterObservation,
     RingObservation,
 };
 use tarpc::client::RpcError;
@@ -286,6 +287,36 @@ impl Agent for TestAgent {
             |settings| &settings.backlight,
             0x1982,
         )
+    }
+
+    async fn read_pointer_speed(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        unreachable!("profile capture does not read presenter pointer speed")
+    }
+
+    async fn set_pointer_speed(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _speed: PointerSpeed,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never write pointer speed")
+    }
+
+    async fn observe_presenter(self, _: TarpcContext, _since: Generation) -> PresenterObservation {
+        unreachable!("profile capture must not inspect the presenter overlay")
+    }
+
+    async fn set_presenter_settings(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _settings: PresenterSettings,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never write presenter settings")
     }
 }
 

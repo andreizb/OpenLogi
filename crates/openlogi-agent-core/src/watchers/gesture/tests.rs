@@ -166,9 +166,13 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             receiver_access: access.clone(),
             device_io,
         };
-        let mut actions =
-            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
-                .unwrap();
+        let mut actions = crate::runtime::ActionRuntime::new(
+            Arc::default(),
+            device_access.clone(),
+            ring,
+            capture_plans.clone(),
+        )
+        .unwrap();
         let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
             false,
             VerticalScrollSensitivity::default(),
