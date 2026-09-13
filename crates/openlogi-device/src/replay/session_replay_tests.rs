@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::ButtonId;
@@ -64,7 +65,7 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
         host,
     );
 
-    let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
+    let outcome = replay.run_to_shutdown(capture, shutdown).await;
 
     replay.assert_restored(outcome, GESTURE_CID, GESTURE_ARMED_FLAGS);
 }
@@ -90,7 +91,7 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
         host,
     );
 
-    let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
+    let outcome = replay.run_to_shutdown(capture, shutdown).await;
 
     replay.assert_restored(outcome, KEYBOARD_CID, KEYBOARD_ARMED_FLAGS);
 }
@@ -198,6 +199,25 @@ impl ArmedReplay {
             .send(())
             .expect("capture session still owns its shutdown receiver");
         self.wireless_lookup.release();
+    }
+
+    /// Drive `capture` to a clean shutdown. The session must still be running
+    /// when the wireless lookup is reached — a capture that finished earlier
+    /// never armed, so every assertion after it would pass vacuously.
+    async fn run_to_shutdown(
+        &self,
+        capture: impl Future<Output = Result<CaptureSessionOutcome, CaptureSessionFailure>>,
+        shutdown: oneshot::Sender<()>,
+    ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+        let mut capture = Box::pin(capture);
+        tokio::select! {
+            result = &mut capture => match result {
+                Ok(_) => panic!("capture ended before wireless lookup"),
+                Err(error) => panic!("capture failed before wireless lookup: {error:?}"),
+            },
+            () = self.stop_after_arm(shutdown) => {}
+        }
+        capture.await
     }
 
     /// A normal shutdown restored `cid`'s reporting through the channel the
@@ -388,6 +408,7 @@ fn capture_cassette(name: &str, cid: u16, control_flags: (u8, u8), armed_flags: 
             reprog_control_info_exchange(cid, control_flags),
             root_ping_exchange(),
             root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
+            // Capture opens a fresh session and reads the control table again.
             reprog_control_count_exchange(1),
             reprog_control_info_exchange(cid, control_flags),
             reprog_reporting_state_exchange(cid),
