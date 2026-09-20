@@ -20,8 +20,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
     Observation, PROTOCOL_VERSION, PairingCommandError, PairingPhase, PairingUpdate,
-    PresenterObservation,
-    RingObservation,
+    PresenterObservation, RingObservation,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;

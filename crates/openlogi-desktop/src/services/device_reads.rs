@@ -154,7 +154,7 @@ impl DeviceReads {
         let Some((client, runtime)) = self.cache() else {
             return;
         };
-        let generation = self.take_generation();
+        let flight = self.take_flight();
         let fetch_route = route.clone();
         let fetcher = Retry::new(
             runtime,
@@ -181,7 +181,7 @@ impl DeviceReads {
             let load = project_load(query_state.read(cx), pointer_speed_error_is_permanent);
             if state
                 .device_reads_mut()
-                .update_pointer_speed(&observed_key, generation, load)
+                .update_pointer_speed(&observed_key, flight, load)
             {
                 cx.emit(StateEvent::PresenterChanged(observed_key.clone()));
             }
@@ -190,7 +190,7 @@ impl DeviceReads {
             key,
             DeviceRead {
                 route,
-                generation,
+                flight,
                 load,
                 query,
                 _observer: observer,
@@ -460,13 +460,13 @@ impl DeviceReads {
     fn update_pointer_speed(
         &mut self,
         key: &DeviceKey,
-        generation: u64,
+        flight: u64,
         load: PointerSpeedLoad,
     ) -> bool {
         let Some(read) = self
             .pointer_speed
             .get_mut(key)
-            .filter(|read| read.generation == generation)
+            .filter(|read| read.flight == flight)
         else {
             return false;
         };

@@ -143,9 +143,7 @@ pub(crate) fn presenter_profile_scope_bar(
     let model = profile_scope_model(editing_app, profiles, &recent_apps, catalog, cx);
     let actions = ProfileScopeActions::new(
         |app, cx| {
-            AppState::update_bindings(cx, |state| {
-                state.set_editing_app(app);
-            });
+            AppState::apply(cx, |state| state.set_editing_app(app));
         },
         |profile, window, cx| open_presenter_remove_confirmation(window, cx, &profile),
     );
@@ -387,9 +385,7 @@ fn open_presenter_remove_confirmation(window: &mut Window, cx: &mut App, profile
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
-                AppState::update_bindings(cx, |state| {
-                    state.remove_editing_app_profile();
-                });
+                AppState::apply(cx, AppState::remove_editing_app_profile);
                 true
             })
     });

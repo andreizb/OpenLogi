@@ -10,7 +10,7 @@ use gpui::{
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, popover::PopoverState, v_flex};
 use openlogi_core::binding::{Action, ButtonId, Category, GestureDirection};
 
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
@@ -220,12 +220,8 @@ pub(crate) fn presenter_action_picker<T: 'static>(
     let observer = observer.clone();
     let popover = cx.entity().downgrade();
     let on_pick: PickFn = Rc::new(move |action, window, cx| {
-        AppState::update(cx, |state, cx| {
-            let key = state.current_record().map(DeviceRecord::device_key);
-            state.commit_presenter_binding_for(profile.as_deref(), button, action);
-            if let Some(key) = key {
-                cx.emit(StateEvent::PresenterChanged(key));
-            }
+        AppState::apply(cx, |state| {
+            state.commit_presenter_binding_for(profile.as_deref(), button, action)
         });
         observer.update(cx, |_, cx| cx.notify());
         if let Some(popover) = popover.upgrade() {

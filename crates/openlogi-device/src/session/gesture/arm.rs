@@ -8,7 +8,10 @@ use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
 use tracing::{debug, warn};
 
-use super::{CaptureSpec, CapturedInput};
+use super::{
+    CaptureSpec, CapturedInput, presenter_button_needs_raw_xy, presenter_hold_cid,
+    presenter_task_ids_for_button,
+};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
 use crate::session::capture_restore::{

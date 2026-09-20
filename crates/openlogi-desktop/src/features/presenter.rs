@@ -18,7 +18,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     popover::Popover,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{Slider, SliderState},
     switch::Switch,
     v_flex,
 };
@@ -26,8 +26,9 @@ use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::color::Rgb;
 use openlogi_core::hid::{PointerSpeed, PresenterEffect, PresenterSettings, PresenterTimerMode};
 
-use crate::features::mouse::picker::presenter_action_picker;
+use crate::features::binding_editor::presenter_action_picker;
 use crate::state::{AppState, DeviceKey, DeviceRecord, Load};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,17 +49,19 @@ enum SettingsSliderKind {
     VibrationIntensity,
 }
 
+/// Every Spotlight settings slider. One unit type covers them all: each
+/// range fits `u16`, and the narrower fields clamp on commit.
 struct SettingsSliders {
-    highlight_contrast: Entity<SliderState>,
-    highlight_radius: Entity<SliderState>,
-    magnifier_radius: Entity<SliderState>,
-    magnification: Entity<SliderState>,
-    laser_size: Entity<SliderState>,
-    vibration_intensity: Entity<SliderState>,
+    highlight_contrast: CommitSlider<u16>,
+    highlight_radius: CommitSlider<u16>,
+    magnifier_radius: CommitSlider<u16>,
+    magnification: CommitSlider<u16>,
+    laser_size: CommitSlider<u16>,
+    vibration_intensity: CommitSlider<u16>,
 }
 
 impl SettingsSliders {
-    fn get(&self, kind: SettingsSliderKind) -> &Entity<SliderState> {
+    fn get(&self, kind: SettingsSliderKind) -> &CommitSlider<u16> {
         match kind {
             SettingsSliderKind::HighlightContrast => &self.highlight_contrast,
             SettingsSliderKind::HighlightRadius => &self.highlight_radius,
@@ -75,12 +78,10 @@ pub struct PresenterControlsView {
     #[expect(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
     section: PresenterSection,
-    speed_slider: Option<Entity<SliderState>>,
-    speed_sub: Option<Subscription>,
+    speed_slider: Option<CommitSlider<u8>>,
     speed_key: Option<DeviceKey>,
     settings_key: Option<(DeviceKey, Option<String>)>,
     settings_sliders: Option<SettingsSliders>,
-    settings_subs: Vec<Subscription>,
     color_input: Option<Entity<InputState>>,
     timer_input: Option<Entity<InputState>>,
 }
@@ -105,11 +106,9 @@ impl PresenterControlsView {
             state_obs,
             section: PresenterSection::Buttons,
             speed_slider: None,
-            speed_sub: None,
             speed_key: None,
             settings_key: None,
             settings_sliders: None,
-            settings_subs: Vec::new(),
             color_input: None,
             timer_input: None,
         }
@@ -124,97 +123,51 @@ impl PresenterControlsView {
     ) {
         if self.speed_key.as_ref() == Some(key) {
             if let Some(slider) = &self.speed_slider {
-                let target = f32::from(speed.get());
-                slider.update(cx, |state, cx| {
-                    if (state.value().start() - target).abs() > f32::EPSILON {
-                        state.set_value(target, window, cx);
-                    }
-                });
+                slider.sync(speed.get(), window, cx);
             }
             return;
         }
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .max(f32::from(PointerSpeed::MAX.get()))
-                .min(f32::from(PointerSpeed::MIN.get()))
-                .step(1.)
-                .default_value(f32::from(speed.get()))
-        });
-        let sub = cx.subscribe(&slider, |_panel, _slider, event: &SliderEvent, cx| {
-            if let SliderEvent::Release(value) = event
-                && let Some(speed) = speed_from_slider(value.start())
-            {
-                AppState::update(cx, |state, cx| {
-                    let key = state.current_record().map(DeviceRecord::device_key);
-                    state.commit_pointer_speed(speed);
-                    if let Some(key) = key {
-                        cx.emit(crate::state::StateEvent::PresenterChanged(key));
-                    }
-                });
-            }
-            cx.notify();
-        });
-        self.speed_slider = Some(slider);
-        self.speed_sub = Some(sub);
+        self.speed_slider = Some(CommitSlider::new(
+            SliderRange::new(PointerSpeed::MIN.get(), PointerSpeed::MAX.get()),
+            speed.get(),
+            cx,
+            |_panel, level, cx| {
+                // The range is built from the two valid bounds, so every
+                // level the thumb can rest on is one `PointerSpeed` accepts.
+                if let Some(speed) = PointerSpeed::new(level) {
+                    AppState::apply(cx, |state| state.commit_pointer_speed(speed));
+                }
+            },
+        ));
         self.speed_key = Some(key.clone());
     }
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "slider values are rounded and clamped to each persisted integer range"
-    )]
-    fn create_settings_slider(
+    fn settings_slider(
         kind: SettingsSliderKind,
         profile: Option<String>,
-        min: f32,
-        max: f32,
-        step: f32,
-        value: f32,
+        range: SliderRange<u16>,
+        value: u16,
         cx: &mut Context<Self>,
-    ) -> (Entity<SliderState>, Subscription) {
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .max(max)
-                .min(min)
-                .step(step)
-                .default_value(value)
-        });
-        let sub = cx.subscribe(&slider, move |_panel, _slider, event: &SliderEvent, cx| {
-            let SliderEvent::Release(value) = event else {
-                return;
-            };
-            let value = value.start().round();
-            AppState::update(cx, |state, cx| {
+    ) -> CommitSlider<u16> {
+        CommitSlider::new(range, value, cx, move |_panel, value, cx| {
+            AppState::apply(cx, |state| {
                 let mut settings = state.presenter_settings_for(profile.as_deref());
+                // `SliderRange` already holds the thumb inside each field's
+                // range, so the narrowing conversions cannot saturate.
+                let narrowed = u8::try_from(value).unwrap_or(u8::MAX);
                 match kind {
-                    SettingsSliderKind::HighlightContrast => {
-                        settings.effect_contrast = value.clamp(10., 100.) as u8;
-                    }
-                    SettingsSliderKind::HighlightRadius => {
-                        settings.spotlight_radius = value.clamp(50., 320.) as u16;
-                    }
-                    SettingsSliderKind::MagnifierRadius => {
-                        settings.magnifier_radius = value.clamp(50., 240.) as u16;
-                    }
-                    SettingsSliderKind::Magnification => {
-                        settings.magnification = value.clamp(125., 500.) as u16;
-                    }
-                    SettingsSliderKind::LaserSize => {
-                        settings.effect_size = value.clamp(50., 200.) as u8;
-                    }
+                    SettingsSliderKind::HighlightContrast => settings.effect_contrast = narrowed,
+                    SettingsSliderKind::HighlightRadius => settings.spotlight_radius = value,
+                    SettingsSliderKind::MagnifierRadius => settings.magnifier_radius = value,
+                    SettingsSliderKind::Magnification => settings.magnification = value,
+                    SettingsSliderKind::LaserSize => settings.effect_size = narrowed,
                     SettingsSliderKind::VibrationIntensity => {
-                        settings.vibration_intensity = value.clamp(0., 100.) as u8;
+                        settings.vibration_intensity = narrowed;
                     }
                 }
-                state.commit_presenter_settings_for(profile.as_deref(), settings);
-                if let Some(key) = state.current_record().map(DeviceRecord::device_key) {
-                    cx.emit(crate::state::StateEvent::PresenterChanged(key));
-                }
+                state.commit_presenter_settings_for(profile.as_deref(), settings)
             });
-            cx.notify();
-        });
-        (slider, sub)
+        })
     }
 
     fn ensure_settings_sliders(
@@ -228,87 +181,42 @@ impl PresenterControlsView {
         if self.settings_key.as_ref() == Some(&settings_key) {
             return;
         }
-        let specs = [
-            (
-                SettingsSliderKind::HighlightContrast,
-                10.,
-                100.,
-                1.,
-                f32::from(settings.effect_contrast),
-            ),
-            (
-                SettingsSliderKind::HighlightRadius,
-                50.,
-                320.,
-                1.,
-                f32::from(settings.spotlight_radius),
-            ),
-            (
-                SettingsSliderKind::MagnifierRadius,
-                50.,
-                240.,
-                1.,
-                f32::from(settings.magnifier_radius),
-            ),
-            (
-                SettingsSliderKind::Magnification,
-                125.,
-                500.,
-                5.,
-                f32::from(settings.normalized_magnification()),
-            ),
-            (
-                SettingsSliderKind::LaserSize,
-                50.,
-                200.,
-                1.,
-                f32::from(settings.effect_size),
-            ),
-            (
-                SettingsSliderKind::VibrationIntensity,
-                0.,
-                100.,
-                1.,
-                f32::from(settings.vibration_intensity),
-            ),
-        ];
-        let mut entities = Vec::new();
-        let mut subscriptions = Vec::new();
-        for (kind, min, max, step, value) in specs {
-            let (entity, subscription) = Self::create_settings_slider(
-                kind,
-                settings_key.1.clone(),
-                min,
-                max,
-                step,
-                value,
-                cx,
-            );
-            entities.push(entity);
-            subscriptions.push(subscription);
-        }
-        let Ok(
-            [
-                highlight_contrast,
-                highlight_radius,
-                magnifier_radius,
-                magnification,
-                laser_size,
-                vibration_intensity,
-            ],
-        ) = <[Entity<SliderState>; 6]>::try_from(entities)
-        else {
-            return;
+        let profile = settings_key.1.clone();
+        let mut build = |kind, range: SliderRange<u16>, value| {
+            Self::settings_slider(kind, profile.clone(), range, value, cx)
         };
         self.settings_sliders = Some(SettingsSliders {
-            highlight_contrast,
-            highlight_radius,
-            magnifier_radius,
-            magnification,
-            laser_size,
-            vibration_intensity,
+            highlight_contrast: build(
+                SettingsSliderKind::HighlightContrast,
+                SliderRange::new(10, 100),
+                u16::from(settings.effect_contrast),
+            ),
+            highlight_radius: build(
+                SettingsSliderKind::HighlightRadius,
+                SliderRange::new(50, 320),
+                settings.spotlight_radius,
+            ),
+            magnifier_radius: build(
+                SettingsSliderKind::MagnifierRadius,
+                SliderRange::new(50, 240),
+                settings.magnifier_radius,
+            ),
+            magnification: build(
+                SettingsSliderKind::Magnification,
+                SliderRange::new(125, 500).step(5.),
+                settings.normalized_magnification(),
+            ),
+            laser_size: build(
+                SettingsSliderKind::LaserSize,
+                SliderRange::new(50, 200),
+                u16::from(settings.effect_size),
+            ),
+            vibration_intensity: build(
+                SettingsSliderKind::VibrationIntensity,
+                SliderRange::new(0, 100),
+                u16::from(settings.vibration_intensity),
+            ),
         });
-        self.settings_subs = subscriptions;
         self.settings_key = Some(settings_key);
     }
 
@@ -361,7 +269,12 @@ impl Render for PresenterControlsView {
         ) {
             (Load::Ready(speed), Some(key)) => {
                 self.ensure_speed_slider(&key, *speed, window, cx);
-                speed_control(self.speed_slider.as_ref(), *speed, pal).into_any_element()
+                speed_control(
+                    self.speed_slider.as_ref().map(CommitSlider::slider),
+                    *speed,
+                    pal,
+                )
+                .into_any_element()
             }
             (Load::Failed(error), Some(key)) => pointer_speed_failure(error, key, &view, pal),
             (Load::Unsupported(error), _) => muted(error, pal),
@@ -741,7 +654,7 @@ fn effect_card(
                         .ghost()
                         .label(format!("{}. {title}", index + 1))
                         .on_click(move |_, _, cx| {
-                            AppState::update(cx, |state, _| {
+                            AppState::apply(cx, |state| {
                                 let mut settings =
                                     state.presenter_settings_for(select_profile.as_deref());
                                 settings.effect = effect;
@@ -749,7 +662,7 @@ fn effect_card(
                                 state.commit_presenter_settings_for(
                                     select_profile.as_deref(),
                                     settings,
-                                );
+                                )
                             });
                             select_view.update(cx, |_, cx| cx.notify());
                         }),
@@ -764,7 +677,7 @@ fn effect_card(
                                 .icon(IconName::ChevronUp)
                                 .disabled(index == 0)
                                 .on_click(move |_, _, cx| {
-                                    AppState::update(cx, |state, _| {
+                                    AppState::apply(cx, |state| {
                                         let mut settings =
                                             state.presenter_settings_for(up_profile.as_deref());
                                         if index > 0 {
@@ -773,7 +686,7 @@ fn effect_card(
                                         state.commit_presenter_settings_for(
                                             up_profile.as_deref(),
                                             settings,
-                                        );
+                                        )
                                     });
                                     up_view.update(cx, |_, cx| cx.notify());
                                 }),
@@ -785,7 +698,7 @@ fn effect_card(
                                 .icon(IconName::ChevronDown)
                                 .disabled(index == 2)
                                 .on_click(move |_, _, cx| {
-                                    AppState::update(cx, |state, _| {
+                                    AppState::apply(cx, |state| {
                                         let mut settings =
                                             state.presenter_settings_for(down_profile.as_deref());
                                         if index < 2 {
@@ -794,7 +707,7 @@ fn effect_card(
                                         state.commit_presenter_settings_for(
                                             down_profile.as_deref(),
                                             settings,
-                                        );
+                                        )
                                     });
                                     down_view.update(cx, |_, cx| cx.notify());
                                 }),
@@ -804,7 +717,7 @@ fn effect_card(
                                 .checked(enabled)
                                 .on_click(move |checked, _, cx| {
                                     let enabled = *checked;
-                                    AppState::update(cx, |state, _| {
+                                    AppState::apply(cx, |state| {
                                         let mut settings =
                                             state.presenter_settings_for(toggle_profile.as_deref());
                                         if enabled {
@@ -815,7 +728,7 @@ fn effect_card(
                                         state.commit_presenter_settings_for(
                                             toggle_profile.as_deref(),
                                             settings,
-                                        );
+                                        )
                                     });
                                     toggle_view.update(cx, |_, cx| cx.notify());
                                 }),
@@ -826,13 +739,13 @@ fn effect_card(
             card.child(setting_slider(
                 "Contrast",
                 format!("{}%", settings.effect_contrast),
-                sliders.map(|sliders| sliders.get(SettingsSliderKind::HighlightContrast)),
+                sliders.map(|sliders| sliders.get(SettingsSliderKind::HighlightContrast).slider()),
                 pal,
             ))
             .child(setting_slider(
                 "Spotlight size",
                 format!("{} pt", settings.spotlight_radius),
-                sliders.map(|sliders| sliders.get(SettingsSliderKind::HighlightRadius)),
+                sliders.map(|sliders| sliders.get(SettingsSliderKind::HighlightRadius).slider()),
                 pal,
             ))
             .child(highlight_preview(settings, pal))
@@ -841,7 +754,7 @@ fn effect_card(
             card.child(setting_slider(
                 "Lens size",
                 format!("{} pt", settings.magnifier_radius),
-                sliders.map(|sliders| sliders.get(SettingsSliderKind::MagnifierRadius)),
+                sliders.map(|sliders| sliders.get(SettingsSliderKind::MagnifierRadius).slider()),
                 pal,
             ))
             .child(setting_slider(
@@ -850,7 +763,7 @@ fn effect_card(
                     "{:.2}×",
                     f32::from(settings.normalized_magnification()) / 100.
                 ),
-                sliders.map(|sliders| sliders.get(SettingsSliderKind::Magnification)),
+                sliders.map(|sliders| sliders.get(SettingsSliderKind::Magnification).slider()),
                 pal,
             ))
         })
@@ -858,7 +771,7 @@ fn effect_card(
             card.child(setting_slider(
                 "Laser size",
                 format!("{}%", settings.effect_size),
-                sliders.map(|sliders| sliders.get(SettingsSliderKind::LaserSize)),
+                sliders.map(|sliders| sliders.get(SettingsSliderKind::LaserSize).slider()),
                 pal,
             ))
             .child(color_swatches(
@@ -960,7 +873,7 @@ fn color_swatches(
                         .bg(rgb(packed))
                         .cursor_pointer()
                         .on_click(move |_, _, cx| {
-                            AppState::update(cx, |state, _| {
+                            AppState::apply(cx, |state| {
                                 let mut settings =
                                     state.presenter_settings_for(swatch_profile.as_deref());
                                 if magnifier {
@@ -971,7 +884,7 @@ fn color_swatches(
                                 state.commit_presenter_settings_for(
                                     swatch_profile.as_deref(),
                                     settings,
-                                );
+                                )
                             });
                             swatch_view.update(cx, |_, cx| cx.notify());
                         })
@@ -1019,14 +932,14 @@ fn color_editor(
                             let Some(color) = parse_rgb(&value) else {
                                 return;
                             };
-                            AppState::update(cx, |state, _| {
+                            AppState::apply(cx, |state| {
                                 let mut settings =
                                     state.presenter_settings_for(laser_profile.as_deref());
                                 settings.effect_color = color;
                                 state.commit_presenter_settings_for(
                                     laser_profile.as_deref(),
                                     settings,
-                                );
+                                )
                             });
                             laser_view.update(cx, |_, cx| cx.notify());
                         }),
@@ -1040,14 +953,14 @@ fn color_editor(
                             let Some(color) = parse_rgb(&value) else {
                                 return;
                             };
-                            AppState::update(cx, |state, _| {
+                            AppState::apply(cx, |state| {
                                 let mut settings =
                                     state.presenter_settings_for(lens_profile.as_deref());
                                 settings.magnifier_color = color;
                                 state.commit_presenter_settings_for(
                                     lens_profile.as_deref(),
                                     settings,
-                                );
+                                )
                             });
                             lens_view.update(cx, |_, cx| cx.notify());
                         }),
@@ -1129,10 +1042,10 @@ fn setting_switch(
                 .checked(checked)
                 .on_click(move |checked, _, cx| {
                     let checked = *checked;
-                    AppState::update(cx, |state, _| {
+                    AppState::apply(cx, |state| {
                         let mut settings = state.presenter_settings_for(profile.as_deref());
                         update(&mut settings, checked);
-                        state.commit_presenter_settings_for(profile.as_deref(), settings);
+                        state.commit_presenter_settings_for(profile.as_deref(), settings)
                     });
                     view.update(cx, |_, cx| cx.notify());
                 }),
@@ -1168,11 +1081,11 @@ fn timer_inspector(
             Button::new(("presenter-timer-mode", index)).label(label)
                 .when(settings.normalized_timer_mode() == mode, ButtonVariants::primary)
                 .on_click(move |_, _, cx| {
-                    AppState::update(cx, |state, _| {
+                    AppState::apply(cx, |state| {
                         let mut settings = state.presenter_settings_for(mode_profile.as_deref());
                         settings.timer_mode = mode;
                         if mode == PresenterTimerMode::Countdown && settings.timer_seconds == 0 { settings.timer_seconds = 15 * 60; }
-                        state.commit_presenter_settings_for(mode_profile.as_deref(), settings);
+                        state.commit_presenter_settings_for(mode_profile.as_deref(), settings)
                     });
                     mode_view.update(cx, |_, cx| cx.notify());
                 })
@@ -1186,11 +1099,11 @@ fn timer_inspector(
                     Button::new(("presenter-timer-preset", index)).label(label)
                         .when(settings.timer_seconds == minutes * 60, ButtonVariants::primary)
                         .on_click(move |_, _, cx| {
-                            AppState::update(cx, |state, _| {
+                            AppState::apply(cx, |state| {
                                 let mut settings = state.presenter_settings_for(preset_profile.as_deref());
                                 settings.timer_mode = PresenterTimerMode::Countdown;
                                 settings.timer_seconds = minutes * 60;
-                                state.commit_presenter_settings_for(preset_profile.as_deref(), settings);
+                                state.commit_presenter_settings_for(preset_profile.as_deref(), settings)
                             });
                             preset_view.update(cx, |_, cx| cx.notify());
                         })
@@ -1200,11 +1113,11 @@ fn timer_inspector(
                     .child(Button::new("presenter-custom-timer").label("Set minutes").on_click(move |_, _, cx| {
                         let value = input.read(cx).value().to_string();
                         let Ok(minutes) = value.trim().parse::<u16>() else { return; };
-                        AppState::update(cx, |state, _| {
+                        AppState::apply(cx, |state| {
                             let mut settings = state.presenter_settings_for(input_profile.as_deref());
                             settings.timer_mode = PresenterTimerMode::Countdown;
                             settings.timer_seconds = minutes.clamp(1, u16::MAX / 60).saturating_mul(60);
-                            state.commit_presenter_settings_for(input_profile.as_deref(), settings);
+                            state.commit_presenter_settings_for(input_profile.as_deref(), settings)
                         });
                         input_view.update(cx, |_, cx| cx.notify());
                     })))
@@ -1233,7 +1146,7 @@ fn vibration_inspector(
         .child(setting_slider(
             "Vibration intensity",
             format!("{}%", settings.vibration_intensity),
-            sliders.map(|sliders| sliders.get(SettingsSliderKind::VibrationIntensity)),
+            sliders.map(|sliders| sliders.get(SettingsSliderKind::VibrationIntensity).slider()),
             pal,
         ))
         .child(section_rule(pal))
@@ -1357,13 +1270,6 @@ fn parse_rgb(value: &str) -> Option<Rgb> {
         u8::try_from((rgb >> 8) & 0xff).ok()?,
         u8::try_from(rgb & 0xff).ok()?,
     ))
-}
-
-fn speed_from_slider(value: f32) -> Option<PointerSpeed> {
-    let value = value.round().clamp(0., f32::from(PointerSpeed::MAX.get()));
-    (0..PointerSpeed::COUNT)
-        .find(|level| (f32::from(*level) - value).abs() < f32::EPSILON)
-        .and_then(PointerSpeed::new)
 }
 
 fn muted(message: impl Into<String>, pal: Palette) -> AnyElement {

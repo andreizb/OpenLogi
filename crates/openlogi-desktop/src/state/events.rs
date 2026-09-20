@@ -70,6 +70,7 @@ impl StateEvent {
             | Self::BindingsChanged(key)
             | Self::DpiChanged(key)
             | Self::SmartShiftChanged(key)
+            | Self::PresenterChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -210,6 +211,7 @@ impl AppState {
             | StateEvent::BindingsChanged(_)
             | StateEvent::DpiChanged(_)
             | StateEvent::SmartShiftChanged(_)
+            | StateEvent::PresenterChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

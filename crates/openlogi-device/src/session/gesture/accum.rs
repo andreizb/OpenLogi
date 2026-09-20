@@ -5,7 +5,7 @@ use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use super::{CapturedInput, GESTURE_SOURCE_BUTTONS};
+use super::{CapturedInput, GESTURE_SOURCE_BUTTONS, presenter_button_needs_raw_xy};
 use crate::reprog_controls::{self, RawControlEvent};
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports

@@ -211,4 +211,22 @@ impl ReprogControlsV4 {
         .await?;
         Ok(())
     }
+
+    /// Hand `cid` back to the firmware: clear temporary diversion and raw XY.
+    ///
+    /// Restoring a control the device never listed has no recorded original
+    /// state to write back, so a virtual presenter hold CID is cleared through
+    /// this rather than through a capture restore's recorded reporting entries.
+    pub async fn undivert_cid(&self, cid: u16) -> Result<(), Hidpp20Error> {
+        self.set_cid_reporting_full(
+            cid,
+            hidpp_reprog::CidReportingChange {
+                diverted: Some(false),
+                raw_xy: Some(false),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
+    }
 }

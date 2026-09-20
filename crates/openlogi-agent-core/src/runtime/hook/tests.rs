@@ -51,6 +51,8 @@ fn test_dispatcher() -> (
                 device_io: openlogi_hid::device_io_channel().1,
             },
             action_ring,
+            capture_plans: tokio::sync::watch::channel(Arc::new(Vec::new())).1,
+            presenter: crate::presenter::PresenterManager::default(),
         },
         buttons: owner.input(),
     };

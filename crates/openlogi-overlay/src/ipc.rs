@@ -235,43 +235,6 @@ async fn observe_presenter(tx: mpsc::UnboundedSender<PresenterObservation>) {
     observe(Observer::presenter, |observed| observed, tx, "presenter").await;
 }
 
-async fn poll_presenter(tx: mpsc::UnboundedSender<PresenterObservation>) {
-    let mut client = None;
-    let mut seen: Generation = 0;
-    let mut unreachable_since: Option<Instant> = None;
-    loop {
-        if client.is_none() {
-            client = connect().await;
-            seen = 0;
-        }
-        let Some(active) = client.as_ref() else {
-            if give_up(&mut unreachable_since, Instant::now()) {
-                stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
-            }
-            tokio::time::sleep(RETRY_PERIOD).await;
-            continue;
-        };
-        unreachable_since = None;
-        let mut ctx = context::current();
-        ctx.deadline = std::time::Instant::now() + OBSERVE_HOLD + Duration::from_secs(5);
-        match active.observe_presenter(ctx, seen).await {
-            Ok(observed) => {
-                if observed.generation == seen {
-                    continue;
-                }
-                seen = observed.generation;
-                if tx.send(observed).is_err() {
-                    return;
-                }
-            }
-            Err(error) => {
-                debug!(?error, "presenter state channel disconnected");
-                client = None;
-            }
-        }
-    }
-}
-
 /// Fold a newly-produced command into the one still waiting to be sent.
 ///
 /// A hover is dropped once its own session has already been activated or

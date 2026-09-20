@@ -52,8 +52,7 @@ pub async fn run(args: LightingArgs) -> Result<()> {
     let color: Rgb = args.color.trim_start_matches('#').parse()?;
     let (r, g, b) = color.components();
 
-    let (route, name, channel) =
-        select_device(args.device.as_deref(), LIGHTING_FEATURES).await?;
+    let (route, name, channel) = select_device(args.device.as_deref(), LIGHTING_FEATURES).await?;
 
     let method: LightingMethod = args.method.into();
     println!("setting {name} ({route}) to #{r:02x}{g:02x}{b:02x} via {method:?}");

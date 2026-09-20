@@ -93,14 +93,17 @@ fn online_candidates(inventory: &DeviceInventory, registry: &ChannelRegistry) ->
                 .codename
                 .clone()
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            let Some(channel) = registry.lookup(&route) else {
+            // A device inventory never published a channel for is still
+            // online and still worth naming in "no match" errors; only the
+            // diagnostics that must talk to it skip it.
+            let channel = registry.lookup(&route);
+            if channel.is_none() {
                 tracing::warn!(%route, "inventory did not publish an open channel for online device");
-                continue;
-            };
+            }
             candidates.push(Candidate {
                 route,
                 name,
-                channel: Some(channel),
+                channel,
             });
         } else {
             tracing::warn!(
@@ -203,7 +206,7 @@ mod tests {
     };
     use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
-    use super::{Candidate, no_match_err, online_candidates};
+    use super::{Candidate, ChannelRegistry, no_match_err, online_candidates};
 
     fn candidate(name: &str) -> Candidate {
         Candidate {
@@ -259,7 +262,7 @@ mod tests {
     fn unresolved_receiver_route_is_ignored() {
         let inventory = inventory(0xc547, None, vec![paired(2, "G502 X Plus", true)]);
 
-        assert!(online_candidates(&inventory).is_empty());
+        assert!(online_candidates(&inventory, &ChannelRegistry::default()).is_empty());
     }
 
     #[test]
@@ -269,7 +272,7 @@ mod tests {
             Some("receiver-uid"),
             vec![paired(4, "G502 X Plus", true)],
         );
-        let candidates = online_candidates(&inventory);
+        let candidates = online_candidates(&inventory, &ChannelRegistry::default());
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "G502 X Plus");
@@ -289,7 +292,7 @@ mod tests {
             None,
             vec![paired(DIRECT_DEVICE_INDEX, "G502 X Plus", true)],
         );
-        let candidates = online_candidates(&inventory);
+        let candidates = online_candidates(&inventory, &ChannelRegistry::default());
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(
@@ -310,7 +313,7 @@ mod tests {
             vec![paired(2, "G502 X Plus", false)],
         );
 
-        assert!(online_candidates(&inventory).is_empty());
+        assert!(online_candidates(&inventory, &ChannelRegistry::default()).is_empty());
     }
 
     fn inventory(

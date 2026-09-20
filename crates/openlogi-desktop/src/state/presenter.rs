@@ -8,7 +8,7 @@ use openlogi_core::bindings::presenter_bindings_for;
 use openlogi_core::hid::{PointerSpeed, PresenterSettings};
 
 use super::devices::DeviceRecord;
-use super::{AppState, DeviceKey, Load, PointerSpeedLoad, StateEvent};
+use super::{AppState, DeviceKey, Load, PointerSpeedLoad, StateEvent, StateEvents};
 
 impl AppState {
     /// Effective presenter settings for the profile currently open in the UI.
@@ -49,19 +49,20 @@ impl AppState {
         &mut self,
         profile: Option<&str>,
         settings: PresenterSettings,
-    ) {
+    ) -> StateEvents {
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string)
         else {
-            return;
+            return StateEvents::none();
         };
         self.config.edit(|config| match profile {
             Some(app) => config.set_per_app_presenter(&key, app, Some(settings)),
             None => config.set_presenter(&key, settings),
         });
         self.persist_and_reload("presenter settings");
+        self.for_current_device(StateEvent::PresenterChanged)
     }
 
     /// Commit one Spotlight button action into the selected profile.
@@ -70,13 +71,13 @@ impl AppState {
         profile: Option<&str>,
         button: ButtonId,
         action: Action,
-    ) {
+    ) -> StateEvents {
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string)
         else {
-            return;
+            return StateEvents::none();
         };
         self.config.edit(|config| match profile {
             Some(app) => config.set_per_app_binding(&key, app, button, Some(action)),
@@ -84,6 +85,7 @@ impl AppState {
         });
         self.refresh_binding_projections();
         self.persist_and_reload("presenter binding");
+        self.for_current_device(StateEvent::PresenterChanged)
     }
 
     pub(super) fn load_current_pointer_speed(&mut self, cx: &mut Context<Self>) {
@@ -110,23 +112,24 @@ impl AppState {
 
     /// Retry the selected presenter's pointer-speed read.
     pub(crate) fn retry_pointer_speed_read(cx: &mut App, key: DeviceKey) {
-        Self::update(cx, |state, cx| {
+        Self::apply(cx, |state| {
             state.pointer.reads.retry_pointer_speed(&key);
-            cx.emit(StateEvent::PresenterChanged(key));
+            StateEvent::PresenterChanged(key).into()
         });
     }
 
     /// Commit a live pointer-speed level through the agent.
-    pub(crate) fn commit_pointer_speed(&mut self, speed: PointerSpeed) {
+    pub(crate) fn commit_pointer_speed(&mut self, speed: PointerSpeed) -> StateEvents {
         let Some((key, route)) = self.current_record().and_then(|record| {
             record
                 .route
                 .clone()
                 .map(|route| (record.device_key(), route))
         }) else {
-            return;
+            return StateEvents::none();
         };
         self.pointer.reads.set_pointer_speed_ready(&key, speed);
         self.send_ipc(crate::services::ipc::SetPointerSpeed { route, speed });
+        StateEvent::PresenterChanged(key).into()
     }
 }

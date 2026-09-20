@@ -297,7 +297,9 @@ async fn pending_restore_undiverts_a_virtual_presenter_hold_control() {
     };
     let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
     let channel = scripted_channel(raw).await;
-    let shared = SharedChannel::new(channel, route);
+    let shared = SharedChannel::new(channel.clone(), route.clone());
+    let registry = ChannelRegistry::default();
+    registry.replace_node(NodeId::from("presenter-node".to_owned()), [route], channel);
     let hold_cid = PRESENTER_HOLD_CIDS[0].0;
     let pending = PendingCaptureRestore::new(
         &shared,
@@ -306,8 +308,10 @@ async fn pending_restore_undiverts_a_virtual_presenter_hold_control() {
     )
     .expect("a virtual presenter hold control should require restoration");
 
+    // A normal teardown restores through the channel it still holds, so the
+    // hold CID is cleared without waiting for a replacement publication.
     assert!(matches!(
-        pending.restore_standalone(&shared).await,
+        pending.allow_current_channel().retry(&registry).await,
         CaptureSessionOutcome::Restored
     ));
     let reports = handle.written_reports();
