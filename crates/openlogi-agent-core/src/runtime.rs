@@ -7,6 +7,7 @@
 
 mod button;
 pub mod hook;
+mod pointer;
 pub mod scroll;
 
 use std::collections::HashMap;
@@ -34,11 +35,18 @@ pub(crate) enum ActionDispatchTarget {
     SafariProcess(i32),
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
+    /// The pointer context that selected the binding. Validated off the tap
+    /// before output, never substituted with an unrelated foreground window.
+    Pointer(openlogi_hook::PointerTarget),
 }
 
 impl ActionDispatchTarget {
     fn capture() -> Self {
         openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+    }
+
+    fn for_pointer(target: Option<openlogi_hook::PointerTarget>) -> Self {
+        target.map_or_else(Self::capture, Self::Pointer)
     }
 }
 /// Held output owned by accepted press capabilities rather than by a capture
@@ -86,6 +94,10 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        let Some(target) = target.resolve(action) else {
+            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
+            return;
+        };
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -316,6 +328,9 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
+        if action.held_combo().is_some() && target.resolve(action).is_none() {
+            return;
+        }
         if !self.held.start(press, action) {
             self.executor.dispatch_to(action, device_key, target);
         }
@@ -429,6 +444,19 @@ impl ActionDispatcher {
         true
     }
 
+    pub(crate) fn dispatch_pointer_action(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: Option<openlogi_hook::PointerTarget>,
+    ) {
+        self.executor.dispatch_to(
+            action,
+            device_key,
+            ActionDispatchTarget::for_pointer(target),
+        );
+    }
+
     /// Queue one OS-hook down edge without blocking the callback. The returned
     /// token uniquely identifies this accepted press.
     pub(crate) fn try_hook_button_down(
@@ -487,9 +515,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) -> Option<PressToken> {
-        self.buttons
-            .try_hidpp_down(session, button, binding, ActionDispatchTarget::capture())
+        self.buttons.try_hidpp_down(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target),
+        )
     }
 
     /// Queue one HID++ up edge for a specific capture session.
@@ -504,9 +537,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) {
-        self.buttons
-            .try_hidpp_pulse(session, button, binding, ActionDispatchTarget::capture());
+        self.buttons.try_hidpp_pulse(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target),
+        );
     }
 
     /// Cancel presses from a HID++ session that is stopping or has died.
@@ -519,6 +557,13 @@ impl ActionDispatcher {
     /// generation are ignored even if they arrive after this call's wake-up.
     pub fn cancel_all_buttons(&self) {
         self.buttons.invalidate_all();
+    }
+
+    /// End only pointer-scoped presses when the hovered window changes.
+    /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
+    /// Preserve presses already admitted against the newly published target.
+    pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
+        self.buttons.cancel_pointer_except(current);
     }
 
     /// Cancel only presses owned by an OS-hook callback. HID++ capture does not
@@ -607,6 +652,9 @@ fn dispatch_browser_navigation(
         ActionDispatchTarget::Keyboard => {
             keyboard();
             true
+        }
+        ActionDispatchTarget::Pointer(_) => {
+            unreachable!("pointer targets resolve before navigation")
         }
     }
 }
