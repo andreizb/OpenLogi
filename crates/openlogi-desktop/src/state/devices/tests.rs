@@ -4,6 +4,7 @@ use openlogi_core::device::{
 };
 
 use crate::services::assets::AssetResolver;
+use crate::services::i18n::LOCALE_LOCK;
 
 use std::collections::HashSet;
 
@@ -268,6 +269,7 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             haptic_feedback: false,
             haptic_panel: false,
             dpi_gestures: false,
+            fn_lock: false,
             presenter_controls: false,
         },
         light_capabilities: None,
@@ -341,6 +343,8 @@ fn no_model_info_falls_back_to_slot_when_no_wpid() {
 
 #[test]
 fn no_model_info_display_name_falls_back_to_slot() {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
     let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
     let resolver = AssetResolver::new();
     let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
@@ -349,6 +353,8 @@ fn no_model_info_display_name_falls_back_to_slot() {
 
 #[test]
 fn saved_custom_name_identifies_the_device_without_replacing_its_model_name() {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
     let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
     let mut config = Config::default();
     config.set_device_custom_name("receiver:da2699e1:slot:2", Some("Office keyboard".into()));

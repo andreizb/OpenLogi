@@ -34,9 +34,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
-/// v3 adds event-capable feature indexes and `Capabilities::presenter_controls`,
-/// both of which must be freshly probed rather than inferred from an older cache.
-const SCHEMA_VERSION: u32 = 3;
+/// v3 adds event-capable feature indexes and presenter controls.
+/// v4 adds the `0x1F20` ADC-measurement event index.
+const SCHEMA_VERSION: u32 = 4;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -241,6 +241,7 @@ mod tests {
                 events: EventFeatureIndices {
                     wireless_status: Some(7),
                     unified_battery: Some(9),
+                    adc_measurement: Some(11),
                 },
                 probed_at: Instant::now(),
             },
@@ -278,6 +279,7 @@ mod tests {
             EventFeatureIndices {
                 wireless_status: Some(7),
                 unified_battery: Some(9),
+                adc_measurement: Some(11),
             },
             "event feature indexes are immutable and kept"
         );

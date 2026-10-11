@@ -8,8 +8,9 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
-    PointerSpeed, PresenterSettings, ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, FnLockState, LightCommand,
+    PasskeyMethod, PointerSpeed, PresenterSettings, ReceiverSelector, ScrollWheelMode,
+    SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -19,8 +20,8 @@ use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingPhase, PairingUpdate,
-    PresenterObservation, RingObservation,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, PresenterObservation, RingObservation,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -39,6 +40,7 @@ enum ReadFamily {
     Smartshift,
     Wheel,
     Backlight,
+    FnLock,
 }
 
 #[derive(Clone)]
@@ -146,6 +148,23 @@ impl Agent for TestAgent {
         _status: SmartShiftStatus,
     ) -> Result<(), WriteError> {
         unreachable!("profile capture must never write SmartShift")
+    }
+
+    async fn set_fn_lock(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        unreachable!("profile capture must never write Fn-lock")
+    }
+
+    async fn unpair_device(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<(), PairingFailure> {
+        unreachable!("profile capture must never unpair a device")
     }
 
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
@@ -316,6 +335,19 @@ impl Agent for TestAgent {
         _settings: PresenterSettings,
     ) -> Result<(), WriteError> {
         unreachable!("profile capture must never write presenter settings")
+    }
+
+    async fn read_fn_lock(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<FnLockState, WriteError> {
+        self.read(
+            ReadFamily::FnLock,
+            &route,
+            |settings| &settings.fn_lock,
+            0x40a3,
+        )
     }
 }
 

@@ -52,7 +52,7 @@ pub fn button_bindings_for(
         .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();
     for (button, mut binding) in stored {
-        if !ButtonId::ALL.contains(&button) {
+        if !ButtonId::ALL.contains(&button) && !matches!(button, ButtonId::Control(_)) {
             continue;
         }
         if let Binding::Gesture(map) = &mut binding {

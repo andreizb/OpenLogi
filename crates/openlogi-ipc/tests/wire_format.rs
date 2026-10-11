@@ -31,7 +31,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
@@ -41,10 +41,10 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
-    DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, PointerSpeed,
-    PresenterEffect, PresenterSettings, ReceiverSelector, ScrollReportingTarget, ScrollWheelMode,
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
-    WriteError,
+    DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod,
+    PointerSpeed, PresenterEffect, PresenterSettings, ReceiverSelector, ScrollReportingTarget,
+    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -105,7 +105,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 32);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 #[test]
@@ -220,22 +220,22 @@ fn assert_presenter_request_variant_order() {
     };
     assert_wire(
         &AgentRequest::ReadPointerSpeed { route: route() },
-        "1c02fb6d04fb03b5",
+        "1f02fb6d04fb03b5",
     );
     assert_wire(
         &AgentRequest::SetPointerSpeed {
             route: route(),
             speed: PointerSpeed::new(4).expect("valid pointer speed"),
         },
-        "1d02fb6d04fb03b504",
+        "2002fb6d04fb03b504",
     );
-    assert_wire(&AgentRequest::ObservePresenter { since: 7 }, "1e07");
+    assert_wire(&AgentRequest::ObservePresenter { since: 7 }, "2107");
     assert_wire(
         &AgentRequest::SetPresenterSettings {
             route: route(),
             settings: PresenterSettings::default(),
         },
-        "1f02fb6d04fb03b50107010200000001013200010064648c6ec80666663362333006666666666666",
+        "2202fb6d04fb03b50107010200000001013200010064648c6ec80666663362333006666666666666",
     );
 }
 
@@ -259,6 +259,42 @@ fn semantic_read_requests() {
         },
         "1b0008463030444341464501",
     );
+    assert_wire(
+        &AgentRequest::ReadFnLock {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1c0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetFnLock {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            fn_lock: true,
+        },
+        "1d000846303044434146450101",
+    );
+    assert_wire(
+        &AgentRequest::UnpairDevice {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1e0008463030444341464501",
+    );
+}
+
+/// A chord crosses the wire as its modifier bits and the key's HID usage.
+#[test]
+fn key_combo_modifier_bits() {
+    let combo = |text: &str| text.parse::<KeyCombo>().expect("valid chord");
+    assert_wire(&combo("Cmd+L"), "010f");
+    assert_wire(&combo("Super+L"), "100f");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -309,9 +345,13 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    assert_wire(&HidppOperation::WriteFnLock, "0c");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
-    assert_wire(&HidppOperation::ReadPointerSpeed, "0f");
-    assert_wire(&HidppOperation::WritePointerSpeed, "10");
+    assert_wire(&HidppOperation::ReadFnLock, "0f");
+    assert_wire(&HidppOperation::ReadPointerScaling, "10");
+    assert_wire(&HidppOperation::WritePointerScaling, "11");
+    assert_wire(&HidppOperation::ReadPointerSpeed, "12");
+    assert_wire(&HidppOperation::WritePointerSpeed, "13");
     assert_wire(&PointerSpeed::new(4).expect("valid pointer speed"), "04");
 }
 
@@ -504,12 +544,13 @@ fn device_inventory() {
                 haptic_panel: true,
                 dpi_gestures: true,
                 presenter_controls: false,
+                fn_lock: false,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010000",
     );
 }
 
@@ -642,6 +683,12 @@ fn semantic_read_payloads() {
         nb_levels: 8,
     });
     assert_wire(&backlight, "000101020408");
+
+    let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
+        fn_lock: true,
+        default_fn_lock: false,
+    });
+    assert_wire(&fn_lock, "000100");
 }
 
 #[test]

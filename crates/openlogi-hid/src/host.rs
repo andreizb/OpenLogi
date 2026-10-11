@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{LightCommand, PairingError, PointerSpeed, WriteError};
+use openlogi_core::hid::{FnLockState, LightCommand, PairingError, PointerSpeed, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -24,7 +24,7 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -74,6 +74,20 @@ pub async fn get_pointer_speed(route: &DeviceRoute) -> Result<PointerSpeed, Writ
 /// Set Spotlight's pointer-speed level.
 pub async fn set_pointer_speed(route: &DeviceRoute, speed: PointerSpeed) -> Result<(), WriteError> {
     device::set_pointer_speed(&*native_backend(), route, speed).await
+}
+
+/// Read the pointer-motion scaling of the device `route` reaches.
+pub async fn get_pointer_scaling(route: &DeviceRoute) -> Result<PointerScaling, WriteError> {
+    device::get_pointer_scaling(&*native_backend(), route).await
+}
+
+/// Write a pointer-motion scaling to the device `route` reaches and return the
+/// value it applied.
+pub async fn set_pointer_scaling(
+    route: &DeviceRoute,
+    scaling: PointerScaling,
+) -> Result<PointerScaling, WriteError> {
+    device::set_pointer_scaling(&*native_backend(), route, scaling).await
 }
 
 /// Read the SmartShift mode, threshold and torque of the device `route` reaches.
@@ -129,8 +143,13 @@ pub async fn set_scroll_wheel_mode(
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
 }
 
-/// Set the Fn-key inversion of the keyboard `route` reaches.
-pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<(), WriteError> {
+/// Read the Fn-lock state of the keyboard `route` reaches.
+pub async fn get_fn_lock(route: &DeviceRoute) -> Result<FnLockState, WriteError> {
+    device::get_fn_lock(&*native_backend(), route).await
+}
+
+/// Set the Fn-lock of the keyboard `route` reaches and read it back.
+pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<FnLockState, WriteError> {
     device::set_fn_lock(&*native_backend(), route, on).await
 }
 

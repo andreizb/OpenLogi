@@ -24,6 +24,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod pointer_scaling;
 mod pointer_speed;
 mod smartshift;
 
@@ -38,7 +39,7 @@ pub use dpi::{
     set_dpi_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
-pub use fn_lock::{set_fn_lock, set_fn_lock_on};
+pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on, play_presenter_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{
@@ -56,6 +57,7 @@ pub use litra::{
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
 };
+pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
 pub use pointer_speed::{
     get_pointer_speed, get_pointer_speed_on, set_pointer_speed, set_pointer_speed_on,
 };

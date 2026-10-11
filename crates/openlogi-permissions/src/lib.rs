@@ -16,7 +16,7 @@
 //! overlay's optional magnifier additionally needs **Screen Recording**; that
 //! grant is scoped to the sibling overlay helper, not this GUI. **Bluetooth** is
 //! surfaced for completeness — OpenLogi reaches BLE mice through `IOHIDManager`,
-//! so it usually reads [`PermissionStatus::Unknown`].
+//! so it usually reads `PermissionStatus::Unknown`.
 //!
 //! Accessibility status is not read here: the agent owns the tap, so
 //! `openlogi_hook::has_accessibility` is the source of truth.

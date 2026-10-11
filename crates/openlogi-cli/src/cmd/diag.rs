@@ -8,7 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{DeviceInventory, DeviceKind};
 use openlogi_hid::{ChannelRegistry, DeviceRoute, SharedChannel, dump_features_on};
 
 pub mod battery;
@@ -16,6 +16,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod pointer_speed;
 pub mod smartshift;
 pub mod wheel;
 
@@ -25,7 +26,7 @@ pub enum DiagCmd {
     Features(features::FeaturesArgs),
     /// Dump HID++ 0x1b04 reprogrammable controls and capability flags.
     Controls(controls::ControlsArgs),
-    /// Read the raw battery report (0x1004 or 0x1000 fields).
+    /// Read the raw battery report (0x1004, 0x1000, or 0x1F20 fields).
     Battery(battery::BatteryArgs),
     /// Read DPI → write a small delta → read back → restore → report.
     Dpi(dpi::DpiArgs),
@@ -35,6 +36,8 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Read 0x2205 pointer scaling → write a test value → read back → restore.
+    PointerSpeed(pointer_speed::PointerSpeedArgs),
 }
 
 impl DiagCmd {
@@ -47,6 +50,7 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::PointerSpeed(args) => pointer_speed::run(args).await,
         }
     }
 }
@@ -57,6 +61,7 @@ impl DiagCmd {
 pub(crate) struct Candidate {
     route: DeviceRoute,
     name: String,
+    kind: DeviceKind,
     /// The channel opened by inventory. Keeping and reusing it avoids opening
     /// the same macOS IOHID node a second time while the first handle is still
     /// being retired by the OS.
@@ -103,6 +108,7 @@ fn online_candidates(inventory: &DeviceInventory, registry: &ChannelRegistry) ->
             candidates.push(Candidate {
                 route,
                 name,
+                kind: paired.kind,
                 channel,
             });
         } else {
@@ -150,6 +156,16 @@ pub(crate) async fn select_device(
     query: Option<&str>,
     required_features: &[u16],
 ) -> Result<(DeviceRoute, String, SharedChannel)> {
+    select_device_with_kind(query, required_features)
+        .await
+        .map(|(route, name, _, channel)| (route, name, channel))
+}
+
+/// Selection with device kind for diagnostics whose wire format depends on it.
+pub(crate) async fn select_device_with_kind(
+    query: Option<&str>,
+    required_features: &[u16],
+) -> Result<(DeviceRoute, String, DeviceKind, SharedChannel)> {
     let devices = online_devices().await?;
 
     if let Some(q) = query {
@@ -160,7 +176,7 @@ pub(crate) async fn select_device(
             .and_then(|c| {
                 c.channel
                     .clone()
-                    .map(|channel| (c.route.clone(), c.name.clone(), channel))
+                    .map(|channel| (c.route.clone(), c.name.clone(), c.kind, channel))
             })
             .ok_or_else(|| no_match_err(&devices, query));
     }
@@ -173,7 +189,7 @@ pub(crate) async fn select_device(
             match dump_features_on(channel).await {
                 Ok(entries) => {
                     if entries.iter().any(|e| required_features.contains(&e.id)) {
-                        return Ok((c.route.clone(), c.name.clone(), channel.clone()));
+                        return Ok((c.route.clone(), c.name.clone(), c.kind, channel.clone()));
                     }
                 }
                 Err(e) => {
@@ -195,7 +211,7 @@ pub(crate) async fn select_device(
     devices
         .into_iter()
         .next()
-        .and_then(|c| c.channel.map(|channel| (c.route, c.name, channel)))
+        .and_then(|c| c.channel.map(|channel| (c.route, c.name, c.kind, channel)))
         .ok_or_else(|| no_match_err(&[], None))
 }
 
@@ -215,6 +231,7 @@ mod tests {
                 product_id: 0xc539,
             },
             name: name.to_string(),
+            kind: DeviceKind::Mouse,
             channel: None,
         }
     }
