@@ -46,15 +46,19 @@ use super::{
 };
 
 mod asset_targets;
+mod backlight;
 mod bindings;
 mod camera;
-mod device_list;
+pub(crate) mod device_list;
 mod device_names;
 mod dpi;
+mod easy_switch;
 mod fn_lock;
 mod lighting;
+mod os_layout;
 mod profile_scope;
 mod reload;
+mod report_rate;
 mod smartshift;
 mod transient_identity;
 mod wheel_resolution;
@@ -90,6 +94,7 @@ fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }

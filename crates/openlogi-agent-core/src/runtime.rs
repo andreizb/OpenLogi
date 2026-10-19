@@ -78,15 +78,15 @@ struct HeldShortcuts {
 
 impl HeldShortcuts {
     fn start(&mut self, press: &PressToken, action: &Action) -> bool {
-        let Some(combo) = action.held_combo() else {
+        let Some((combo, keys)) = action.held_chord() else {
             return false;
         };
         match self.by_press.entry(press.clone()) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().replace(combo);
+                held.get_mut().replace(combo, keys);
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(openlogi_inject::press_hold(combo));
+                slot.insert(openlogi_inject::press_hold(combo, keys));
             }
         }
         true
@@ -265,6 +265,7 @@ impl ActionExecutor {
         let plan = self
             .capture_plans
             .borrow()
+            .plans()
             .iter()
             .find(|plan| plan.dispatch.config_key == key)
             .cloned();
@@ -352,7 +353,7 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
-        if action.held_combo().is_some() && target.resolve(action).is_none() {
+        if action.held_chord().is_some() && target.resolve(action).is_none() {
             return;
         }
         if !self.held.start(press, action) {
@@ -696,7 +697,9 @@ mod tests {
         // unavailable.
         let (_signal, device_io) = openlogi_hid::device_io_channel();
         let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_plans_tx, capture_plans) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        let (_plans_tx, capture_plans) = tokio::sync::watch::channel(Arc::new(
+            crate::capture_plan::CapturePublication::default(),
+        ));
         let executor = ActionExecutor {
             dpi_cycle: Arc::default(),
             access: DeviceAccess {
@@ -704,6 +707,7 @@ mod tests {
                 registry: openlogi_hid::ChannelRegistry::default(),
                 receiver_access: crate::receiver_access::ReceiverAccess::default(),
                 device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
             capture_plans,

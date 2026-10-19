@@ -1,9 +1,11 @@
 //! Orchestrator tests: the shared fixtures, and one module per area.
 
 use super::{
-    AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, battery_needs_alert, build_devices, configured_wheel_mode,
-    host_switch_links, pick_current, plan_reapply, reapply_targets, stable_id,
+    AgentDevice, InventoryHealth, Orchestrator, RECONNECT_REAPPLY_CONFIRM_RETRIES,
+    VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, battery_needs_alert,
+    build_devices, configured_report_rate, configured_wheel_mode, host_switch_links,
+    keeps_os_layout, newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply,
+    reapply_targets, settings_moved, stable_id,
 };
 use crate::hardware::WheelModeChange;
 use openlogi_core::app::ForegroundApp;
@@ -17,7 +19,7 @@ use openlogi_core::device::{
     ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
-use openlogi_core::hid::Dpi;
+use openlogi_core::hid::{Dpi, ReportRate};
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use std::sync::Arc;
 
@@ -27,6 +29,7 @@ mod camera;
 mod capture_plans;
 mod device_list;
 mod device_settings;
+mod os_layout;
 mod publication;
 mod reapply;
 
@@ -53,6 +56,7 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         light_capabilities: None,
         online,
         low_battery: false,
+        settings_revision: 0,
     }
 }
 
@@ -80,6 +84,7 @@ fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInve
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }

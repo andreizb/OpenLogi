@@ -49,9 +49,13 @@ fn test_dispatcher() -> (
                 registry: openlogi_hid::ChannelRegistry::default(),
                 receiver_access: crate::receiver_access::ReceiverAccess::default(),
                 device_io: openlogi_hid::device_io_channel().1,
+                transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
-            capture_plans: tokio::sync::watch::channel(Arc::new(Vec::new())).1,
+            capture_plans: tokio::sync::watch::channel(Arc::new(
+                crate::capture_plan::CapturePublication::default(),
+            ))
+            .1,
             presenter: crate::presenter::PresenterManager::default(),
         },
         buttons: owner.input(),

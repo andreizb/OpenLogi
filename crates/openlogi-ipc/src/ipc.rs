@@ -18,15 +18,17 @@ use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PairingError,
-    PasskeyMethod, PointerSpeed, PresenterEffect, PresenterSettings, ReceiverSelector,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, PairingError, PasskeyMethod, PointerSpeed, PresenterEffect, PresenterSettings,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
 
-/// Wire-protocol version. Bumped only on a breaking change to the types below —
-/// independent of the crate version. The GUI checks it via
+/// Wire-protocol version. Bumped on a breaking change to the types below, at
+/// most once per release: a change made while this is already above the latest
+/// release's value joins that unreleased version (`crates/openlogi-ipc/AGENTS.md`).
+/// Independent of the crate version. The GUI checks it via
 /// [`Agent::protocol_version`] on connect and refuses to drive a mismatch
 /// (transient only: both binaries ship in one `.app` and update atomically).
 ///
@@ -70,9 +72,39 @@ pub use succession::Identity;
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
 /// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
-/// v36: Spotlight capabilities, pointer speed, settings and overlay state
-///      appended to the v35 upstream wire surface.
-pub const PROTOCOL_VERSION: u32 = 36;
+/// v36: `Action::TapKeyHoldingModifiers` appended for switcher-style output
+///      that holds the modifiers and taps the ordinary key once;
+///      `WriteError::{DpiUnsupported, DpiNotApplied}` appended — `set_dpi`
+///      rejects unsupported values and reports a write the device kept;
+///      `BatteryInfo::percentage` became `Option<u8>` — `None` when the
+///      device reports only a level (a `0x1004` without the state-of-charge
+///      capability) or has no reading yet; `PairedDevice::settings_revision`
+///      appended — it moves when the device reports a setting changed on it;
+///      `FnLockState::default_fn_lock` became `Option<bool>` — `None` for a
+///      `0x40a0` keyboard, which reports no default;
+///      `WriteError::HapticWaveformUnsupported` appended — a haptic play of a
+///      waveform the device does not advertise is refused before it is sent;
+///      `Capabilities::os_layout` and `HidppOperation::WriteOsLayout`
+///      appended — a `0x4531` keyboard whose platform software can set is kept
+///      on the host OS's key layout; `Agent::{read_report_rate,
+///      set_report_rate}`, `Capabilities::report_rate`,
+///      `HidppOperation::{ReadReportRate, WriteReportRate}` and
+///      `WriteError::{ReportRateUnsupported, ReportRateNotApplied}` appended —
+///      the `0x8061`/`0x8060` report rate in hertz; `BacklightState::{power_save,
+///      controls}` and `WriteError::{BacklightChangeUnsupported,
+///      BacklightNotApplied}` appended — `0x1982` battery saving and the
+///      backlight changes a keyboard offers; `Agent::set_backlight` and
+///      `Capabilities::backlight` appended — the keyboard backlight set from
+///      the settings app; `WriteError::HapticsUnavailable` appended — a
+///      haptic play is refused before it is sent while the device reports a
+///      non-zero `0x19b0` haptic status; `Agent::{read_easy_switch_hosts,
+///      rename_easy_switch_host}`, `Capabilities::easy_switch`,
+///      `HidppOperation::{ReadHosts, RenameHost}` and
+///      `WriteError::{HostRenameUnsupported, HostSlotEmpty, HostNameRejected,
+///      HostNameNotApplied}` appended — the `0x1815` Easy-Switch host names
+///      and OS, and renaming a slot's computer.
+/// v37: Spotlight pointer speed, settings and overlay state combined with v36.
+pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -634,4 +666,45 @@ pub trait Agent {
         route: DeviceRoute,
         settings: PresenterSettings,
     ) -> Result<(), WriteError>;
+    /// Read the report rate of the mouse on `route` and every rate it lists
+    /// for its current connection.
+    async fn read_report_rate(route: DeviceRoute) -> Result<ReportRateInfo, WriteError>;
+    /// Write the report rate of the mouse on `route` now and answer with what
+    /// it reads back. A rate the mouse does not list is refused with
+    /// [`WriteError::ReportRateUnsupported`] before anything is written; one
+    /// it acknowledges but does not keep — an onboard profile owns the rate —
+    /// with [`WriteError::ReportRateNotApplied`].
+    async fn set_report_rate(
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError>;
+    /// Apply one backlight change to the keyboard on `route` and answer with
+    /// the backlight it reads back. A change the keyboard does not offer is
+    /// refused with [`WriteError::BacklightChangeUnsupported`] before anything
+    /// is written; one it acknowledges but does not keep with
+    /// [`WriteError::BacklightNotApplied`]. The keyboard stores the result
+    /// itself, so nothing is persisted or replayed.
+    async fn set_backlight(
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError>;
+
+    /// Read the Easy-Switch host slots of the device on `route`: which are
+    /// paired, how each reaches its computer, and the name and OS that
+    /// computer recorded (`0x1815 HostsInfo`).
+    async fn read_easy_switch_hosts(route: DeviceRoute) -> Result<EasySwitchHosts, WriteError>;
+
+    /// Name the computer on Easy-Switch `slot` (zero-based) of the device on
+    /// `route` and answer with the slots it reads back. A device that cannot
+    /// rename, an empty slot and a name that does not fit are refused with
+    /// [`WriteError::HostRenameUnsupported`], [`WriteError::HostSlotEmpty`]
+    /// and [`WriteError::HostNameRejected`] before anything is written; a
+    /// name the device acknowledges but does not keep with
+    /// [`WriteError::HostNameNotApplied`]. The device stores the name itself,
+    /// so nothing is persisted or replayed.
+    async fn rename_easy_switch_host(
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError>;
 }

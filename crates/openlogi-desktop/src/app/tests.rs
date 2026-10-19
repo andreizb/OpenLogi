@@ -104,9 +104,67 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
     assert!(cx.debug_bounds("profile-confirmation").is_none());
 }
 
+/// The device rename dialog must paint its own Save and Cancel buttons: a
+/// plain gpui-component dialog draws only the footer it is given.
+#[gpui::test]
+fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
+    use gpui_component::Root;
+
+    use super::{AppView, home::open_rename_dialog};
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::{AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ))
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update(|window, cx| {
+        open_rename_dialog(
+            window,
+            cx,
+            "direct:046d:b35b:unit:a393cae0".to_owned(),
+            String::new(),
+            "MX Keys".to_owned(),
+        );
+        window.draw(cx).clear(cx);
+    });
+    assert!(
+        cx.debug_bounds("dialog-save").is_some(),
+        "the dialog can be saved"
+    );
+    let cancel = cx
+        .debug_bounds("dialog-cancel")
+        .expect("the dialog can be cancelled");
+
+    cx.simulate_click(cancel.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("dialog-save").is_none(),
+        "Cancel closes the dialog"
+    );
+}
+
 /// "Charging" replaces the bogus percentage only when charging *and* the
-/// reading is still 0% (cold start, no cached pre-charge value). A non-zero
-/// charge or a real 0% while discharging keeps the number.
+/// reading is still 0% or absent with no level (cold start, no cached
+/// pre-charge value). A non-zero charge, a real 0% while discharging, or a
+/// level-only reading keeps something to show.
 #[test]
 fn charging_without_reading_suppresses_percentage() {
     let b = |percentage, status| BatteryInfo {
@@ -114,19 +172,32 @@ fn charging_without_reading_suppresses_percentage() {
         level: BatteryLevel::Good,
         status,
     };
-    assert!(battery_charging_no_reading(&b(0, BatteryStatus::Charging)));
     assert!(battery_charging_no_reading(&b(
-        0,
+        Some(0),
+        BatteryStatus::Charging
+    )));
+    assert!(battery_charging_no_reading(&b(
+        Some(0),
         BatteryStatus::ChargingSlow
     )));
     assert!(!battery_charging_no_reading(&b(
-        40,
+        Some(40),
         BatteryStatus::Charging
     )));
     assert!(!battery_charging_no_reading(&b(
-        0,
+        Some(0),
         BatteryStatus::Discharging
     )));
+    // A level-only device that is charging still has its level to show.
+    assert!(!battery_charging_no_reading(&b(
+        None,
+        BatteryStatus::Charging
+    )));
+    assert!(battery_charging_no_reading(&BatteryInfo {
+        percentage: None,
+        level: BatteryLevel::Unknown,
+        status: BatteryStatus::Charging,
+    }));
 }
 
 #[test]
@@ -138,16 +209,21 @@ fn low_discharging_battery_needs_attention() {
     };
 
     assert!(battery_needs_attention(&battery(
-        20,
+        Some(20),
         BatteryStatus::Discharging
     )));
     assert!(!battery_needs_attention(&battery(
-        21,
+        Some(21),
         BatteryStatus::Discharging
     )));
     assert!(!battery_needs_attention(&battery(
-        20,
+        Some(20),
         BatteryStatus::Charging
+    )));
+    // A device without a percentage is judged by its level.
+    assert!(battery_needs_attention(&battery(
+        None,
+        BatteryStatus::Discharging
     )));
 }
 
@@ -374,6 +450,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         slot: 1,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 
@@ -389,6 +466,42 @@ fn gallery_order_moves_connected_devices_first_stably() {
     records[2].online = false;
 
     assert_eq!(ordered_device_indices(&records), vec![1, 3, 0, 2]);
+}
+
+/// #1699: unlike the #127 scenario below, kind resolution itself can stay
+/// wrong (a Bluetooth-direct MX Master 3S kept kind=Keyboard despite
+/// measuring real buttons+pointer capabilities) — the panel choice has to
+/// tolerate that directly, not just rely on kind having been corrected
+/// upstream. A measured pointer capability must win Buttons over Keys even
+/// then, and Keys must not also show for the same record.
+#[test]
+fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
+    let caps = Some(Capabilities {
+        presenter_controls: false,
+        buttons: true,
+        pointer: true,
+        lighting: false,
+        scroll_inversion: false,
+        hires_wheel: false,
+        thumbwheel: false,
+        haptic_feedback: false,
+        haptic_panel: false,
+        dpi_gestures: false,
+        fn_lock: false,
+        os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+    assert!(
+        tabs.contains(&DetailTab::Buttons),
+        "a measured pointer capability must win Buttons even with kind=Keyboard"
+    );
+    assert!(
+        !tabs.contains(&DetailTab::Keys),
+        "the same record must not also show Keys"
+    );
 }
 
 /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
@@ -408,6 +521,10 @@ fn tabs_follow_capabilities_not_kind() {
         dpi_gestures: false,
         fn_lock: false,
         presenter_controls: false,
+        os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -452,6 +569,10 @@ fn keyboard_without_asset_hides_buttons_tab() {
         dpi_gestures: false,
         fn_lock: false,
         presenter_controls: false,
+        os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -475,6 +596,10 @@ fn keyboard_with_buttons_shows_keys_tab() {
         dpi_gestures: false,
         fn_lock: false,
         presenter_controls: false,
+        os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
@@ -554,3 +679,5 @@ fn unprobed_unknown_device_shows_only_device_tab() {
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
     assert_eq!(tabs, vec![DetailTab::Device]);
 }
+
+mod corpus;

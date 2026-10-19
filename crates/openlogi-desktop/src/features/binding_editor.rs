@@ -110,9 +110,10 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::PresenterHighlight => "action-icons/star.svg",
         Action::PresenterTimer => "action-icons/calendar.svg",
         Action::PresenterScroll => "action-icons/scroll-text.svg",
-        Action::CustomShortcut(_) | Action::HoldShortcut(_) | Action::TypeText(_) => {
-            "action-icons/keyboard.svg"
-        }
+        Action::CustomShortcut(_)
+        | Action::HoldShortcut(_)
+        | Action::TapKeyHoldingModifiers(_)
+        | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }

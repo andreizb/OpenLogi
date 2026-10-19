@@ -24,6 +24,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
         }),
         online: true,
         low_battery: false,
+        settings_revision: 0,
     }
 }
 
@@ -56,6 +57,7 @@ fn direct_inventory_state(
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -84,6 +86,7 @@ fn bolt_inventory(unit_id: [u8; 4]) -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -267,7 +270,7 @@ fn runtime_selection_tracks_online_transition_without_device_set_change() {
 #[test]
 fn battery_alert_requires_a_low_discharging_reading() {
     let reading = |level, status| BatteryInfo {
-        percentage: 10,
+        percentage: Some(10),
         level,
         status,
     };
@@ -307,4 +310,20 @@ fn low_battery_alert_targets_only_presenters() {
     let alerts = orchestrator.presenter_low_battery_alerts();
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0].0, "spotlight");
+}
+
+#[test]
+fn a_setting_changed_on_the_device_is_not_replayed_over() {
+    use std::collections::HashMap;
+    // Fn+Esc on the keyboard, or a DPI button, moves the settings revision.
+    // The user changed the setting on the device on purpose, so the agent
+    // must not write the persisted value back over it.
+    let mut inventory = bolt_inventory([0x6b, 0xe9, 0xd3, 0x00]);
+    let before = build_devices(&Config::default(), std::slice::from_ref(&inventory), &[]);
+    inventory.paired[0].settings_revision += 1;
+    let after = build_devices(&Config::default(), &[inventory], &[]);
+
+    let (targets, followup) = plan_reapply(&before, &after, &HashMap::new(), None);
+    assert!(targets.is_empty());
+    assert!(followup.is_empty());
 }

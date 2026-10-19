@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{Dpi, PresenterSettings};
+use crate::hid::{Dpi, PresenterSettings, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -295,6 +295,20 @@ pub struct DeviceConfig {
     /// profile surfaces share the same bundle-id namespace.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_presenter: BTreeMap<String, PresenterSettings>,
+    /// Keep a multi-platform keyboard's key layout (HID++ `0x4531`) on the
+    /// host OS, the "keep keyboard in OS layout" setting of Logi Options+. The
+    /// agent writes the host's platform when the keyboard connects and again
+    /// whenever the keyboard reports a platform change (a platform key
+    /// combination). `None` means "never set", which is on, as in Options+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_os_layout: Option<bool>,
+    /// Report rate (HID++ `0x8060` / `0x8061`), in hertz. The agent re-applies
+    /// it when the device reconnects, like [`Self::dpi`], but only where the
+    /// device lists it for the connection it is on — a wired-only rate is
+    /// left alone while the mouse is wireless. `None` means "never set —
+    /// leave the device's rate alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_rate: Option<ReportRate>,
 }
 
 impl DeviceConfig {
@@ -397,6 +411,8 @@ impl Default for DeviceConfig {
             fn_lock: None,
             presenter: PresenterSettings::default(),
             per_app_presenter: BTreeMap::new(),
+            keep_os_layout: None,
+            report_rate: None,
         }
     }
 }
@@ -521,6 +537,9 @@ struct RawDeviceConfig {
     presenter: PresenterSettings,
     #[serde(default)]
     per_app_presenter: BTreeMap<String, PresenterSettings>,
+    keep_os_layout: Option<bool>,
+    #[serde(default)]
+    report_rate: Option<ReportRate>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -583,6 +602,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             fn_lock: raw.fn_lock,
             presenter: raw.presenter,
             per_app_presenter: raw.per_app_presenter,
+            keep_os_layout: raw.keep_os_layout,
+            report_rate: raw.report_rate,
         }
     }
 }
