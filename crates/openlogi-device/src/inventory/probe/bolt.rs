@@ -55,9 +55,7 @@ pub(super) async fn probe_bolt_receiver(
     // serializing them costs little.
     let mut identities = Vec::new();
     for slot in 1u8..=MAX_BOLT_SLOTS {
-        if let Some(identity) =
-            read_bolt_slot_identity(&bolt, &channel, by_slot.get(&slot), slot).await
-        {
+        if let Some(identity) = read_bolt_slot_identity(&bolt, by_slot.get(&slot), slot).await {
             identities.push(identity);
         }
     }
@@ -101,18 +99,62 @@ pub(in crate::inventory) fn assemble_bolt_probe(
     pairing_count: Option<u8>,
     slot_results: Vec<(PairedDevice, CacheOutcome)>,
 ) -> NodeProbe {
-    let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().unzip();
+    // The pairing table can retain the same physical unit in more than one
+    // slot after a re-pair. The receiver still counts both occupied slots, so
+    // keep the raw count for probe health, but publish only one route for a
+    // non-zero unit id. Otherwise the Agent, CLI, and GUI all treat an offline
+    // stale slot as a second device. Prefer the online route; ordered slot
+    // results make the lower slot the stable tie-breaker.
+    let readable_slots = slot_results.len();
+    let mut paired = Vec::<PairedDevice>::with_capacity(readable_slots);
+    let mut outcomes = Vec::with_capacity(readable_slots);
+    let mut by_unit_id = HashMap::<[u8; 4], usize>::new();
+    for (device, outcome) in slot_results {
+        let unit_id = match &outcome {
+            CacheOutcome::Fresh(CacheKey::Bolt { unit_id }, _)
+            | CacheOutcome::Update(CacheKey::Bolt { unit_id }, _)
+            | CacheOutcome::Seen(CacheKey::Bolt { unit_id }) => Some(*unit_id),
+            CacheOutcome::Fresh(..)
+            | CacheOutcome::Update(..)
+            | CacheOutcome::Seen(..)
+            | CacheOutcome::Unkeyed => None,
+        };
+        if let Some(unit_id) = unit_id {
+            if let Some(&existing) = by_unit_id.get(&unit_id) {
+                let kept = &mut paired[existing];
+                if device.online && !kept.online {
+                    debug!(
+                        dropped_slot = kept.slot,
+                        kept_slot = device.slot,
+                        "duplicate Bolt pairing identity — keeping online slot"
+                    );
+                    *kept = device;
+                } else {
+                    debug!(
+                        kept_slot = kept.slot,
+                        dropped_slot = device.slot,
+                        "duplicate Bolt pairing identity — suppressing duplicate slot"
+                    );
+                }
+                outcomes.push(outcome);
+                continue;
+            }
+            by_unit_id.insert(unit_id, paired.len());
+        }
+        paired.push(device);
+        outcomes.push(outcome);
+    }
 
     if let Some(count) = pairing_count
-        && paired.len() != usize::from(count)
+        && readable_slots != usize::from(count)
     {
         warn!(
             expected = count,
-            found = paired.len(),
+            found = readable_slots,
             "paired-device count mismatch — some slots may be unreadable"
         );
     }
-    let answered_in_full = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
+    let answered_in_full = pairing_count.is_some_and(|count| readable_slots == usize::from(count));
 
     NodeProbe {
         inventory: Some(DeviceInventory { receiver, paired }),
@@ -142,7 +184,6 @@ struct BoltSlotIdentity {
 /// [`probe_bolt_receiver`].
 async fn read_bolt_slot_identity(
     bolt: &BoltReceiver,
-    channel: &Arc<HidppChannel>,
     event: Option<&BoltDeviceConnection>,
     slot: u8,
 ) -> Option<BoltSlotIdentity> {
@@ -153,7 +194,7 @@ async fn read_bolt_slot_identity(
             return None;
         }
     };
-    let codename = read_codename(channel, slot).await;
+    let codename = bolt.get_device_codename(slot).await.ok();
     // Prefer event data when present — it's a live response. Fall back to the
     // pairing register for sleeping devices that didn't reply.
     let online = event.map_or(pairing.online, |c| c.online);
@@ -247,7 +288,13 @@ async fn walk_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename: identity.codename.clone(),
+        // The device's own `0x0005` name comes first, as on Unifying; the cache
+        // keeps it for a slot that is asleep. The receiver register's name is
+        // the fallback, and stays cut at 27 bytes (#1960).
+        codename: probe
+            .marketing_name
+            .clone()
+            .or_else(|| identity.codename.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.
@@ -299,24 +346,4 @@ async fn drain_device_arrival(
         }
     }
     out
-}
-
-/// Reads a paired device's codename, working around a slicing bug in
-/// `hidpp 0.2`'s `BoltReceiver::get_device_codename` that truncates names
-/// longer than 8 characters (it treats `response[2]` as an end-index when it
-/// is actually the byte length — see Solaar's `device_codename` for the
-/// correct slice). 16-byte long-register response is `[sub, chunk, len,
-/// data..13]`; we cap at 13 to stay in-bounds. Long names (>13 chars) would
-/// need multi-chunk reads with chunk param > 0x01; not needed for v0.0.x.
-async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
-    // 0xFF = receiver device index, 0xB5 = ReceiverInfo register,
-    // 0x60+slot = DeviceCodename sub-register, 0x01 = first chunk.
-    let response = channel
-        .read_long_sub_register(0xFF, 0xB5, 0x60 + slot, [0x01, 0x00])
-        .await
-        .ok()?;
-    let len = usize::from(response[2]).min(13);
-    core::str::from_utf8(&response[3..3 + len])
-        .ok()
-        .map(str::to_string)
 }

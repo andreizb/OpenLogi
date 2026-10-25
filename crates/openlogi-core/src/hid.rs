@@ -15,6 +15,7 @@ pub mod error;
 pub mod fn_lock;
 pub mod light;
 pub mod pairing;
+pub mod pointer_speed;
 pub mod presenter;
 pub mod report_rate;
 pub mod route;
@@ -30,6 +31,7 @@ pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
+pub use pointer_speed::PointerSpeed;
 pub use presenter::{
     PresenterEffect, PresenterPointerSpeed, PresenterSettings, PresenterTimerMode,
 };

@@ -1,4 +1,4 @@
-//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, keeping the OS layout, the report rate, and the stored bindings.
+//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, and the stored bindings.
 
 use super::*;
 
@@ -73,6 +73,36 @@ fn unset_keep_os_layout_is_omitted_from_toml() {
     cfg.set_invert_scroll("2b042", true);
     let body = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(!body.contains("keep_os_layout"), "{body}");
+}
+
+#[test]
+fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
+    let mut cfg = Config::default();
+    assert!(!cfg.smooth_wheel("mouse"));
+    cfg.set_smooth_wheel("mouse", true);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("smooth_wheel = true"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert!(restored.smooth_wheel("mouse"));
+    assert!(!restored.smooth_wheel("absent"));
+    cfg.set_smooth_wheel("mouse", false);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("smooth_wheel"), "off is omitted: {body}");
+    assert!(!write_and_read(&cfg).smooth_wheel("mouse"));
+}
+
+#[test]
+fn a_smooth_wheel_opt_in_survives_route_adoption() {
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_smooth_wheel(route, true);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4403").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert!(
+        !config.devices.contains_key(route),
+        "sanity: the route entry folded"
+    );
+    assert!(config.smooth_wheel("unit:4f4c4403"));
 }
 
 #[test]
@@ -276,6 +306,45 @@ fn unset_report_rate_is_omitted_from_toml() {
     cfg.set_dpi("2b042", Dpi::new(1600));
     let toml = toml::to_string(&cfg).expect("serialize");
     assert!(!toml.contains("report_rate"), "{toml}");
+}
+
+#[test]
+fn pointer_speed_roundtrips_as_the_raw_factor() {
+    use crate::hid::PointerSpeed;
+    let mut cfg = Config::default();
+    let speed = PointerSpeed::try_new(0x0180).expect("in range");
+    cfg.set_pointer_speed("2b042", speed);
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        toml.contains("pointer_speed = 384"),
+        "the speed is stored as its 1/256 factor: {toml}"
+    );
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.pointer_speed("2b042"), Some(speed));
+    assert_eq!(restored.pointer_speed("absent"), None);
+}
+
+#[test]
+fn a_pointer_speed_outside_the_safe_range_does_not_load() {
+    // The firmware takes any 16-bit factor and a tiny one stops the pointer
+    // (#1372), so a hand-edited value outside 32..=768 is refused rather
+    // than written to the mouse.
+    toml::from_str::<Config>("[devices.2b042]\npointer_speed = 1\n")
+        .expect_err("a pointer speed below 32 is refused");
+}
+
+#[test]
+fn a_saved_pointer_speed_survives_route_adoption() {
+    use crate::hid::PointerSpeed;
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_pointer_speed(route, PointerSpeed::MAX);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert_eq!(
+        config.pointer_speed("unit:a393cae0"),
+        Some(PointerSpeed::MAX)
+    );
 }
 
 #[test]

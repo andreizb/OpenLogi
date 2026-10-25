@@ -25,13 +25,16 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
-    OsLayoutOutcome, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
-    WeakSharedChannel, WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
+    FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OsLayoutOutcome,
+    PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
+    WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
+use crate::capture_plan::SharedCapturePlans;
+use crate::pointer_speed::SpeedTarget;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -569,6 +572,36 @@ impl DeviceOp {
         F: FnOnce(DeviceOp) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
     {
+        self.spawn_leased_write(label, None, f, log);
+    }
+
+    /// [`Self::spawn_timed_write`] for a write that must land after every
+    /// earlier write of the same setting and must not be skipped (see
+    /// [`WriteTicket::in_order`]). As in [`Self::run_in_order`], the write
+    /// waits for its turn before it leases the receiver.
+    fn spawn_timed_write_in_order<F, Fut, T>(
+        self,
+        label: &'static str,
+        ticket: WriteTicket,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(DeviceOp) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
+    {
+        self.spawn_leased_write(label, Some(ticket), f, log);
+    }
+
+    fn spawn_leased_write<F, Fut, T>(
+        self,
+        label: &'static str,
+        ticket: Option<WriteTicket>,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(DeviceOp) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
+    {
         match self.resolve() {
             Ok(shared) => drop(shared),
             Err(reason) => {
@@ -580,13 +613,7 @@ impl DeviceOp {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
-            let result = rt.block_on(async move {
-                let _lease = self.access.receiver_access.acquire_for_io().await;
-                if !self.access.device_io.allows_io() {
-                    return None;
-                }
-                Some(f(self).await)
-            });
+            let result = rt.block_on(leased_after_turn(self, ticket, f));
             if let Some(result) = result {
                 log(result);
             } else {
@@ -719,6 +746,124 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
     );
 }
 
+/// Spawn an OS thread that writes `target` to `op`'s mouse, a `0x2205` speed
+/// via [`openlogi_hid::set_pointer_speed_on`] or a DPI via
+/// [`openlogi_hid::set_dpi_target_on`], unless a newer pointer-speed write
+/// for the mouse was requested after `ticket`. Returns immediately; failures
+/// are logged. `on_applied` runs only when the mouse took the write, or when
+/// it reports no default DPI to write.
+///
+/// When `led` is set, the same turn then lights (`true`) or darkens the DPI
+/// LED with [`show_precision_led`]. The LED never fails the speed write: it
+/// gives up before the turn's timeout would.
+pub(crate) fn write_pointer_speed_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    target: SpeedTarget,
+    led: Option<bool>,
+    on_applied: impl FnOnce() + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "pointer-speed write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let started = tokio::time::Instant::now();
+                    let shared = op.resolve()?;
+                    let landed = match target {
+                        SpeedTarget::Scaled(speed) => openlogi_hid::set_pointer_speed_on(&shared, speed)
+                            .await
+                            .map(Landed::Speed)?,
+                        SpeedTarget::Dpi(dpi) => openlogi_hid::set_dpi_target_on(&shared, dpi)
+                            .await?
+                            .map_or(Landed::NoDefaultDpi, Landed::Dpi),
+                    };
+                    if let Some(on) = led {
+                        show_precision_led(&shared, on, started).await;
+                    }
+                    Ok(Some(landed))
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "pointer-speed write", result, |landed| match landed {
+                Some(Landed::Speed(applied)) => {
+                    debug!(index, ?target, %applied, "pointer speed written");
+                    on_applied();
+                }
+                Some(Landed::Dpi(dpi)) => {
+                    debug!(index, ?target, %dpi, "pointer-speed DPI written");
+                    on_applied();
+                }
+                Some(Landed::NoDefaultDpi) => {
+                    // Nothing to write, so nothing to retry at a reconnect:
+                    // the mouse stays at its DPI until one is set.
+                    warn!(
+                        index,
+                        "mouse reports no default DPI — DPI left as it is; set a DPI to leave the lowest one"
+                    );
+                    on_applied();
+                }
+                None => debug!(index, ?target, "pointer-speed write superseded by a newer one"),
+            });
+        },
+    );
+}
+
+/// How long after its speed write started a DPI LED write may run: one
+/// second less than [`WRITE_TIMEOUT`], which bounds the speed write and the
+/// LED write together.
+const PRECISION_LED_BUDGET: Duration = WRITE_TIMEOUT.saturating_sub(Duration::from_secs(1));
+
+/// Run `led`, a DPI LED write that follows a speed write started at
+/// `write_started`, until [`PRECISION_LED_BUDGET`] after that start. `None`
+/// when it ran out of time. The write gives up inside [`WRITE_TIMEOUT`], so
+/// a lost LED reply cannot time out the speed write that already landed.
+async fn within_led_budget<T>(
+    write_started: tokio::time::Instant,
+    led: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::time::timeout_at(write_started + PRECISION_LED_BUDGET, led)
+        .await
+        .ok()
+}
+
+/// Light (`on`) or darken the DPI LED of the mouse on `shared` for
+/// precision mode, after a speed write that started at `write_started`. A
+/// mouse without one gets no write. A failure or a lost reply is logged
+/// only: the LED is a hint, and the speed write it follows has landed.
+pub(crate) async fn show_precision_led(
+    shared: &openlogi_hid::SharedChannel,
+    on: bool,
+    write_started: tokio::time::Instant,
+) {
+    let index = shared.route().device_index();
+    match within_led_budget(write_started, openlogi_hid::set_dpi_led_on(shared, on)).await {
+        Some(Ok(openlogi_hid::DpiLed::Set)) => {}
+        Some(Ok(openlogi_hid::DpiLed::Missing)) => {
+            debug!(index, "no DPI LED to show precision mode");
+        }
+        Some(Err(error)) => debug!(index, on, %error, "DPI LED write failed"),
+        None => debug!(index, on, "DPI LED write ran out of time"),
+    }
+}
+
+/// What a pointer-speed write that reached the mouse did.
+enum Landed {
+    /// The mouse applied this `0x2205` speed.
+    Speed(PointerSpeed),
+    /// The mouse applied this DPI.
+    Dpi(Dpi),
+    /// The write asked for the default DPI, and the mouse reports none.
+    NoDefaultDpi,
+}
+
 /// The devices, by config key, whose "keep OS layout" is in effect as of the
 /// latest config. The orchestrator adds a device when it queues a layout
 /// write and drops it when a reload turns the setting off or disables the
@@ -778,6 +923,177 @@ pub(crate) fn keep_os_layout_in_background(
     );
 }
 
+/// What one cookie write did for one keyboard.
+#[derive(Debug)]
+enum CookieOutcome {
+    Released(LeadCookie, Result<FollowerRelease, HostSwitchError>),
+    Linked(LeadCookie, Result<FollowerLink, HostSwitchError>),
+}
+
+/// The clears of one cookie write that the device has not confirmed. When
+/// the guard is dropped, it gives the clears that are left to `requeue`: the
+/// write failed, timed out, or did not run.
+struct UnconfirmedReleases<F: FnOnce(Vec<LeadCookie>)> {
+    leads: Vec<LeadCookie>,
+    requeue: Option<F>,
+}
+
+impl<F: FnOnce(Vec<LeadCookie>)> UnconfirmedReleases<F> {
+    fn new(leads: Vec<LeadCookie>, requeue: F) -> Self {
+        Self {
+            leads,
+            requeue: Some(requeue),
+        }
+    }
+
+    /// Record that the device no longer holds `lead`.
+    fn confirm(&mut self, lead: LeadCookie) {
+        self.leads.retain(|pending| *pending != lead);
+    }
+}
+
+impl<F: FnOnce(Vec<LeadCookie>)> Drop for UnconfirmedReleases<F> {
+    fn drop(&mut self) {
+        if self.leads.is_empty() {
+            return;
+        }
+        if let Some(requeue) = self.requeue.take() {
+            requeue(std::mem::take(&mut self.leads));
+        }
+    }
+}
+
+/// Wait for `ticket`'s turn, when there is one, then lease the receiver and
+/// run `f`. Returns `None`, without running `f`, when host device I/O was
+/// suspended by then.
+///
+/// The wait comes before the lease. The lease is a fair `RwLock`, so a write
+/// that waited while it held the lease would block a queued pairing session,
+/// and the pairing session would block the earlier write that this one waits
+/// for.
+async fn leased_after_turn<F, Fut>(
+    op: DeviceOp,
+    ticket: Option<WriteTicket>,
+    f: F,
+) -> Option<Fut::Output>
+where
+    F: FnOnce(DeviceOp) -> Fut,
+    Fut: Future,
+{
+    let leased = || async move {
+        let _lease = op.access.receiver_access.acquire_for_io().await;
+        if !op.access.device_io.allows_io() {
+            return None;
+        }
+        Some(f(op).await)
+    };
+    match ticket {
+        Some(ticket) => ticket.in_order(leased).await,
+        None => leased().await,
+    }
+}
+
+/// Spawn one write that clears the bytes in `release` from `op`'s pointing
+/// device and then writes the bytes in `link`, as Logi Options+ does (see
+/// [`openlogi_hid::link_follower_cookies_on`]). The writes for one device run
+/// in the order of their `ticket`, and none is skipped. Returns immediately;
+/// the outcome is logged.
+///
+/// A clear that fails, times out, or does not run because the device is gone
+/// or its I/O is suspended goes to `requeue`, which keeps it for the next
+/// time the device is online.
+pub(crate) fn write_follower_cookies_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    release: Vec<LeadCookie>,
+    link: Vec<LeadCookie>,
+    requeue: impl FnOnce(Vec<LeadCookie>) + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let mut unconfirmed = UnconfirmedReleases::new(release.clone(), requeue);
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write_in_order(
+        "linked device cookie write",
+        ticket,
+        move |op| async move {
+            after_transport_turn(&turn, async {
+                tokio::time::timeout(WRITE_TIMEOUT, async {
+                    let shared = op.resolve()?;
+                    let mut outcomes = Vec::with_capacity(release.len() + link.len());
+                    for lead in release {
+                        let outcome =
+                            openlogi_hid::release_follower_cookies_on(&shared, lead).await;
+                        outcomes.push(CookieOutcome::Released(lead, outcome));
+                    }
+                    for lead in link {
+                        let outcome = openlogi_hid::link_follower_cookies_on(&shared, lead).await;
+                        outcomes.push(CookieOutcome::Linked(lead, outcome));
+                    }
+                    Ok(outcomes)
+                })
+                .await
+            })
+            .await
+        },
+        move |result| {
+            log_outcome(index, "linked device cookie write", result, |outcomes| {
+                for outcome in outcomes {
+                    if let CookieOutcome::Released(lead, Ok(_)) = &outcome {
+                        unconfirmed.confirm(*lead);
+                    }
+                    log_cookie_outcome(index, outcome);
+                }
+            });
+        },
+    );
+}
+
+fn log_cookie_outcome(index: u8, outcome: CookieOutcome) {
+    match outcome {
+        CookieOutcome::Released(lead, Ok(FollowerRelease::Released { slots })) => info!(
+            index,
+            cookie = lead.get(),
+            slots,
+            "linked device cookies no longer name the keyboard"
+        ),
+        CookieOutcome::Linked(lead, Ok(FollowerLink::Linked { slots })) => info!(
+            index,
+            cookie = lead.get(),
+            slots,
+            "linked device cookies now name the keyboard"
+        ),
+        CookieOutcome::Linked(
+            lead,
+            Ok(FollowerLink::LinkedToAnotherKeyboard { cookie: other }),
+        ) => {
+            info!(
+                index,
+                cookie = lead.get(),
+                other,
+                "linked device cookies name another keyboard; left as they are"
+            );
+        }
+        CookieOutcome::Released(lead, Ok(outcome)) => debug!(
+            index,
+            cookie = lead.get(),
+            ?outcome,
+            "linked device cookies left as they are"
+        ),
+        CookieOutcome::Linked(lead, Ok(outcome)) => debug!(
+            index,
+            cookie = lead.get(),
+            ?outcome,
+            "linked device cookies left as they are"
+        ),
+        CookieOutcome::Released(lead, Err(error)) => {
+            warn!(index, cookie = lead.get(), %error, "linked device cookie clear failed");
+        }
+        CookieOutcome::Linked(lead, Err(error)) => {
+            warn!(index, cookie = lead.get(), %error, "linked device cookie write failed");
+        }
+    }
+}
+
 /// The settings a mouse forgets when it power-cycles, as one reapply pushes
 /// them. `None` leaves that setting alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -827,6 +1143,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     op: &DeviceOp,
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
+    capture_plans: &SharedCapturePlans,
 ) {
     match op.resolve() {
         Ok(shared) => drop(shared),
@@ -847,6 +1164,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     let access = op.access.clone();
     let route = op.route.clone();
     let index = route.device_index();
+    let capture_plans = capture_plans.clone();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
             return;
@@ -863,8 +1181,9 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             let op = DeviceOp { access, route };
             let turn = op.access.transport_turns.turn_for(&op.route);
             if let Some(change) = wheel {
+                let (plans, route) = (&capture_plans, &op.route);
                 let result = timed_on_current_channel(&op, &turn, |shared| async move {
-                    change.apply_on(&shared).await
+                    write_native_wheel_mode(change, &shared, plans, route).await
                 })
                 .await;
                 log_wheel_result(index, change, result);
@@ -974,8 +1293,16 @@ impl WheelModeChange {
 fn log_wheel_result(
     index: u8,
     change: WheelModeChange,
-    result: Result<Result<(), WriteError>, Elapsed>,
+    result: Result<Result<NativeWheelWrite, WriteError>, Elapsed>,
 ) {
+    if let Ok(Ok(NativeWheelWrite::StoodDown)) = &result {
+        debug!(
+            index,
+            ?change,
+            "native wheel mode not written: a capture session owns the wheel"
+        );
+        return;
+    }
     // Plenty of mice have no HiResWheel or no inversion bit, so that refusal
     // is expected and stays out of the warnings every other write earns.
     if let Ok(Err(WriteError::FeatureUnsupported { feature_hex })) = &result {
@@ -987,36 +1314,69 @@ fn log_wheel_result(
         );
         return;
     }
-    log_outcome(index, "wheel mode write", result, |()| {
+    log_outcome(index, "wheel mode write", result, |_written| {
         debug!(index, ?change, "native wheel mode written");
     });
 }
 
-/// Spawn an OS thread that writes `dpi` to `op`'s device via its current
-/// shared channel. Returns immediately; failures are logged.
-pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+/// Spawn an OS thread that reconciles the configured native HiResWheel mode
+/// for `op`'s device. Unsupported devices are expected and only logged at
+/// debug level. The write stands down if, by its turn, `capture_plans` hands
+/// the wheel to a capture session (see `write_native_wheel_mode`).
+pub fn write_scroll_wheel_mode_in_background(
+    op: DeviceOp,
+    change: WheelModeChange,
+    capture_plans: SharedCapturePlans,
+) {
     let index = op.route.device_index();
+    let route = op.route.clone();
     op.spawn_write(
-        "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
-        move |result| {
-            log_outcome(index, "DPI write", result, |()| {
-                debug!(index, %dpi, "DPI written to device");
-            });
+        "wheel mode write",
+        move |shared| async move {
+            write_native_wheel_mode(change, &shared, &capture_plans, &route).await
         },
+        move |result| log_wheel_result(index, change, result),
     );
 }
 
-/// Spawn an OS thread that reconciles the configured native HiResWheel mode
-/// for `op`'s device. Unsupported devices are expected and only logged at
-/// debug level.
-pub fn write_scroll_wheel_mode_in_background(op: DeviceOp, change: WheelModeChange) {
-    let index = op.route.device_index();
-    op.spawn_write(
-        "wheel mode write",
-        move |shared| async move { change.apply_on(&shared).await },
-        move |result| log_wheel_result(index, change, result),
-    );
+/// What a native wheel-mode write did once it held its transport turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeWheelWrite {
+    /// The change was written.
+    Written,
+    /// A capture session now owns the wheel, so nothing was written.
+    StoodDown,
+}
+
+/// Write `change` through `shared` unless the latest capture publication
+/// hands the main wheel at `route` to a capture session.
+///
+/// Every resolution or inversion write also selects native reporting, so a
+/// write queued before a plan diverted the wheel would hand it back to the OS
+/// and leave the session's eased scrolling silently off until it re-arms. The
+/// orchestrator queues no such write while the wheel is diverted; this check,
+/// made once the write holds its turn, retires the ones queued before.
+async fn write_native_wheel_mode(
+    change: WheelModeChange,
+    shared: &SharedChannel,
+    capture_plans: &SharedCapturePlans,
+    route: &DeviceRoute,
+) -> Result<NativeWheelWrite, WriteError> {
+    if capture_plans.borrow().diverts_main_wheel(route) {
+        return Ok(NativeWheelWrite::StoodDown);
+    }
+    change.apply_on(shared).await?;
+    if capture_plans.borrow().diverts_main_wheel(route) {
+        // The plan diverted the wheel while this write was on the wire, so it
+        // may have landed after the session's divert.
+        warn!(
+            %route,
+            ?change,
+            "native wheel mode written as capture took the wheel; smooth \
+             scrolling may stay off until the session re-arms"
+        );
+    }
+    Ok(NativeWheelWrite::Written)
 }
 
 /// Apply `lighting` to the keyboard at `op`'s device on a background thread.
@@ -1063,6 +1423,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+    use crate::capture_plan::CapturePublication;
     use openlogi_hid::device_io_channel;
 
     fn device_op(
@@ -1080,6 +1441,58 @@ mod tests {
             transport_turns: TransportTurns::default(),
         }
         .op(route)
+    }
+
+    /// The cookie of the keyboard with unit ID `unit`.
+    fn lead(unit: u32) -> LeadCookie {
+        LeadCookie::for_unit_id(unit.to_be_bytes()).expect("a nonzero unit ID")
+    }
+
+    #[test]
+    fn unconfirmed_clears_are_requeued_when_the_guard_drops() {
+        let requeued = Cell::new(None);
+        let mut unconfirmed =
+            UnconfirmedReleases::new(vec![lead(1), lead(2)], |leads| requeued.set(Some(leads)));
+        unconfirmed.confirm(lead(1));
+        drop(unconfirmed);
+        assert_eq!(requeued.take(), Some(vec![lead(2)]));
+    }
+
+    #[test]
+    fn confirmed_clears_are_not_requeued() {
+        let requeued = Cell::new(false);
+        let mut unconfirmed = UnconfirmedReleases::new(vec![lead(1)], |_| requeued.set(true));
+        unconfirmed.confirm(lead(1));
+        drop(unconfirmed);
+        assert!(!requeued.get(), "a confirmed clear is done");
+    }
+
+    #[test]
+    fn a_cookie_write_that_cannot_run_requeues_its_clears() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let requeued = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requeued_by_write = std::sync::Arc::clone(&requeued);
+        write_follower_cookies_in_background(
+            device_op(&capture, &registry, &receiver_access, &device_io, &route),
+            WriteOrder::default().request(&route),
+            vec![lead(7)],
+            vec![lead(9)],
+            move |leads| {
+                requeued_by_write
+                    .lock()
+                    .expect("not poisoned")
+                    .extend(leads);
+            },
+        );
+        assert_eq!(
+            *requeued.lock().expect("not poisoned"),
+            vec![lead(7)],
+            "the clear waits for the device; the link runs again on reconnect"
+        );
     }
 
     #[test]
@@ -1253,6 +1666,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &rates,
+            &no_capture_plans(),
         );
 
         assert!(
@@ -1282,6 +1696,39 @@ mod tests {
         let ran =
             tokio::time::timeout(Duration::from_secs(1), next.in_order(|| async { true })).await;
         assert_eq!(ran.ok(), Some(true), "the next change gets its turn");
+    }
+
+    /// A background write that waits behind the device's earlier write does
+    /// not hold the receiver lease meanwhile: a pairing session queued then
+    /// still gets the receiver, and the waiting write runs once the earlier
+    /// one finishes.
+    #[tokio::test]
+    async fn an_ordered_background_write_waits_for_its_turn_before_the_lease() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let cookies = WriteOrder::default();
+        let earlier = cookies.request(&route);
+        let later = cookies.request(&route);
+        let op = device_op(&capture, &registry, &receiver_access, &device_io, &route);
+        let waiting = tokio::spawn(leased_after_turn(op, Some(later), |_| async { "written" }));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let pairing = tokio::time::timeout(
+            Duration::from_secs(1),
+            receiver_access
+                .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing),
+        )
+        .await
+        .expect("pairing is not blocked by a write that waits for its turn");
+        drop(pairing);
+        drop(earlier);
+        let ran = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the waiting write runs after the earlier one")
+            .expect("the waiting write did not panic");
+        assert_eq!(ran, Some("written"));
     }
 
     /// A reconnect write to a mouse that stopped answering holds the turn
@@ -1502,6 +1949,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &WriteOrder::default(),
+            &no_capture_plans(),
         );
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
 
@@ -1520,6 +1968,119 @@ mod tests {
         .await
         .expect("reapply finishes without a connection instead of writing the retired one");
         assert!(published.retired.upgrade().is_none());
+    }
+
+    /// A capture publication with no plans: no session owns any wheel.
+    fn no_capture_plans() -> SharedCapturePlans {
+        tokio::sync::watch::channel(Arc::default()).1
+    }
+
+    /// The publication of one capture plan for `route`, which hands that
+    /// device's main wheel to its session when `divert`.
+    fn wheel_publication(route: &DeviceRoute, divert: bool) -> Arc<CapturePublication> {
+        let mut plan = crate::capture_plan::plan_for_device(
+            &openlogi_core::config::Config::default(),
+            openlogi_core::device_order::PhysicalDeviceKey::parse("unit:00000001")
+                .expect("fixture is a physical key"),
+            "mouse",
+            crate::capture_plan::CaptureAvailability::new(false, true),
+            route.clone(),
+            None,
+            0,
+        );
+        plan.target.spec.divert_main_wheel =
+            divert.then(openlogi_hid::session::gesture::MainWheelDivert::default);
+        Arc::new(CapturePublication::from_plans(vec![plan]))
+    }
+
+    /// The two background writes that set a native wheel mode.
+    #[derive(Debug, Clone, Copy)]
+    enum WheelWritePath {
+        /// The reload push of a changed resolution or inversion.
+        Reload,
+        /// The reconnect re-apply of every volatile setting.
+        Reapply,
+    }
+
+    /// Reports the replay mouse receives from a wheel write queued on `path`
+    /// behind a held transport turn, after the capture publication changed
+    /// while it waited to one that diverts the wheel when `divert_while_queued`.
+    async fn reports_from_a_queued_wheel_write(
+        path: WheelWritePath,
+        divert_while_queued: bool,
+    ) -> usize {
+        let published = publish_direct_mouse().await;
+        let turns = TransportTurns::default();
+        let receiver_access = ReceiverAccess::default();
+        let access = DeviceAccess {
+            channel: std::sync::Arc::new(RwLock::new(None)),
+            registry: published.registry.clone(),
+            receiver_access: receiver_access.clone(),
+            device_io: published.device_io.clone(),
+            transport_turns: turns.clone(),
+        };
+        let (publish, plans) =
+            tokio::sync::watch::channel(wheel_publication(&published.route, false));
+        let turn = turns.turn_for(&published.route);
+        let held = turn.lock().await;
+        let change = WheelModeChange::Resolution(ScrollResolution::Low);
+        match path {
+            WheelWritePath::Reload => {
+                write_scroll_wheel_mode_in_background(
+                    access.op(&published.route),
+                    change,
+                    plans.clone(),
+                );
+            }
+            WheelWritePath::Reapply => reapply_mouse_volatile_in_background(
+                &access.op(&published.route),
+                VolatileMouseSettings {
+                    wheel: Some(change),
+                    ..VolatileMouseSettings::default()
+                },
+                &WriteOrder::default(),
+                &plans,
+            ),
+        }
+        wait_until_a_worker_holds_the_receiver(&receiver_access).await;
+        publish.send_replace(wheel_publication(&published.route, divert_while_queued));
+        let written = || {
+            published
+                .backend
+                .channel_completion(ORIGINAL_CHANNEL)
+                .expect("known channel")
+                .written_reports
+                .len()
+        };
+        let before = written();
+        drop(held);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            receiver_access
+                .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing),
+        )
+        .await
+        .expect("the queued write finishes");
+        written() - before
+    }
+
+    /// A wheel write queued before a plan handed the wheel to a capture
+    /// session stands down at its turn on either path: writing a native mode
+    /// would select native reporting under the session. With the wheel still
+    /// native, the same write reaches the mouse.
+    #[tokio::test]
+    async fn a_queued_wheel_write_stands_down_once_capture_owns_the_wheel() {
+        for path in [WheelWritePath::Reload, WheelWritePath::Reapply] {
+            assert_eq!(
+                reports_from_a_queued_wheel_write(path, true).await,
+                0,
+                "{path:?}: the diverted wheel is left to its session"
+            );
+            assert!(
+                reports_from_a_queued_wheel_write(path, false).await > 0,
+                "{path:?}: a native wheel still gets the configured mode"
+            );
+        }
     }
 
     struct PublishedMouse {
@@ -1738,5 +2299,28 @@ mod tests {
                 operation: HidppOperation::WriteDpi
             })
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_led_reply_gives_up_before_the_speed_write_times_out() {
+        let outcome = tokio::time::timeout(WRITE_TIMEOUT, async {
+            let started = tokio::time::Instant::now();
+            // The speed write used most of the turn before the LED write.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let led = within_led_budget(started, std::future::pending::<()>()).await;
+            (led, started.elapsed())
+        })
+        .await;
+
+        let (led, elapsed) = outcome.expect("the speed result outlives a lost LED reply");
+        assert_eq!(led, None);
+        assert!(elapsed < WRITE_TIMEOUT, "gave up after {elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_led_write_that_answers_in_time_keeps_its_result() {
+        let started = tokio::time::Instant::now();
+
+        assert_eq!(within_led_budget(started, async { 7 }).await, Some(7));
     }
 }

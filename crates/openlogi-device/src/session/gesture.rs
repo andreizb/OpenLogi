@@ -19,26 +19,34 @@
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
+//! The main wheel (`0x2121`) is diverted the same way, but only when the
+//! device's smooth-wheel switch asks for it: the GUI then posts eased scrolling
+//! from the [`CapturedInput::MainWheel`] reports (`main_wheel`).
 
 mod accum;
 mod arm;
+pub(super) mod main_wheel;
 
+use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection};
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
-use super::capture::{ArmedCapture, Liveness, run_capture};
+use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
+pub use main_wheel::MainWheelDivert;
 
+use super::capture_restore::ArmedReporting;
 pub use super::capture_restore::{
     CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
     CaptureSessionStop, PendingCaptureRestore,
@@ -91,6 +99,28 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
+    /// Main-wheel movement while a wheel-hold button is held. The firmware
+    /// reports it over `0x1b04` instead of scrolling, so the agent can scroll
+    /// horizontally in its place.
+    HeldWheel {
+        /// The held button the movement belongs to.
+        button: ButtonId,
+        /// Wheel movement; positive is away from the user.
+        delta: i16,
+        /// Units of `delta` per wheel notch: 1 for a low-resolution report,
+        /// the wheel's `0x2121` multiplier for a high-resolution one.
+        per_notch: NonZeroU8,
+    },
+    /// Main-wheel movement the firmware reports over `0x2121` instead of
+    /// scrolling, while the session diverts the wheel so the agent can post
+    /// smoothed scrolling for it.
+    MainWheel {
+        /// Wheel movement; positive is away from the user.
+        delta: i16,
+        /// Units of `delta` per wheel notch: 1 for a low-resolution report,
+        /// the wheel's `0x2121` multiplier for a high-resolution one.
+        per_notch: NonZeroU8,
+    },
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -128,14 +158,15 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = {
 };
 
 /// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
-/// delivers — the dedicated gesture button, its multiplatform variant, and
-/// the haptic panel. Each source in
+/// delivers — the dedicated gesture button on most MX mice (and its
+/// multiplatform CID on the M720 Triathlon), and the Haptic
+/// Sense Panel on MX Master 4 (two distinct physical controls). Each source in
 /// gesture mode is diverted with raw-XY; one with a non-default single binding
 /// instead is plain-diverted like a standard button.
 pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
     (reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton),
     (
-        hidpp::feature::reprog_controls::control_ids::MULTIPLATFORM_GESTURE_BUTTON.0,
+        reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID,
         ButtonId::GestureButton,
     ),
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
@@ -235,6 +266,15 @@ pub struct CaptureSpec {
     pub divert_buttons: Vec<(u16, ButtonId)>,
     /// Presenter buttons to resolve by task and temporarily divert.
     pub divert_presenter_buttons: Vec<ButtonId>,
+    /// Standard-button CIDs bound to wheel-hold. A control advertising
+    /// raw-wheel support is diverted with it, so the main wheel reports to the
+    /// agent while the button is held; any other divertable control is
+    /// diverted as a plain press, so its click still works.
+    pub divert_wheel_buttons: Vec<(u16, ButtonId)>,
+    /// Divert the main wheel's movement reports over `0x2121`, writing this
+    /// mode along with the divert; `None` leaves the wheel native. Inert on a
+    /// device without the feature.
+    pub divert_main_wheel: Option<MainWheelDivert>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -305,7 +345,9 @@ impl ArmedCapture for GestureCapture {
             dpi_buttons = armed.dpi_cids.len(),
             buttons = armed.button_cids.len(),
             presenter_holds = armed.presenter_hold_cids.len(),
+            wheel_buttons = armed.wheel_button_cids.len(),
             thumbwheel = armed.thumb.is_some(),
+            main_wheel = armed.main_wheel.is_some(),
             wake_rearm,
             "control capture active"
         );
@@ -331,7 +373,20 @@ impl ArmedCapture for GestureCapture {
             .as_ref()
             .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
         let dpi_set = armed.dpi_cids.clone();
-        let button_set = armed.button_cids.clone();
+        // A wheel-hold button's press and release are ordinary button edges;
+        // only the raw wheel it unlocks needs its own attribution.
+        let button_set: Vec<(u16, ButtonId)> = armed
+            .button_cids
+            .iter()
+            .chain(&armed.wheel_button_cids)
+            .copied()
+            .collect();
+        let wheel_set = armed.wheel_button_cids.clone();
+        let hires_per_notch = armed.hires_per_notch;
+        let main_wheel = armed
+            .main_wheel
+            .as_ref()
+            .map(|wheel| (wheel.feature_index, wheel.per_notch));
         move |msg| {
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(msg, device_index, idx)
@@ -349,6 +404,15 @@ impl ArmedCapture for GestureCapture {
                 );
                 return;
             }
+            if let Some(idx) = reprog_index
+                && let Some(event) = reprog_controls::decode_raw_wheel_event(msg, device_index, idx)
+            {
+                accum
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .on_raw_wheel(event, &wheel_set, hires_per_notch, &sink);
+                return;
+            }
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(msg, device_index, idx)
             {
@@ -357,6 +421,19 @@ impl ArmedCapture for GestureCapture {
                     event.rotation_status,
                 );
                 if let Some(input) = thumbwheel_input(event, previous, thumb_resolution) {
+                    let _ = sink.send(input);
+                }
+                return;
+            }
+            if let Some((idx, per_notch)) = main_wheel
+                && let Some(event) = hires_wheel::decode_event(msg, device_index, idx)
+            {
+                if let HiResWheelEvent::RatchetSwitch(state) = event {
+                    // Not input. The inventory's listener on this channel
+                    // counts it as a setting change, so clients re-read
+                    // SmartShift.
+                    debug!(index = device_index, ?state, "wheel ratchet switched");
+                } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
                     let _ = sink.send(input);
                 }
             }
@@ -375,6 +452,14 @@ impl ArmedCapture for GestureCapture {
 
     async fn rearm(&self) {
         self.armed.rearm().await;
+    }
+
+    fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        self.armed.armed_reporting()
+    }
+
+    fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
+        self.armed.take_reporting_changes()
     }
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
@@ -403,6 +488,9 @@ impl ArmedCapture for GestureCapture {
 /// included. Logi Options+ reads the same sequence as a `Stop`
 /// (`devio_feature_2150::convert`, "Inconsistent transition from ACTIVE to
 /// INACTIVE. Consider this a STOP.").
+///
+/// A status byte the spec does not define never delivers a tap: only
+/// `Inactive` says the wheel is settled. Its rotation still scrolls.
 fn thumbwheel_input(
     event: thumbwheel::ThumbwheelEvent,
     previous: RotationStatus,
@@ -414,7 +502,7 @@ fn thumbwheel_input(
             resolution,
         });
     }
-    if event.rotation_status.is_rolling() || previous.leaves_roll_open() {
+    if !event.rotation_status.is_at_rest() || previous.leaves_roll_open() {
         return None;
     }
     event

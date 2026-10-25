@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{Dpi, PresenterSettings, ReportRate};
+use crate::hid::{Dpi, PointerSpeed, PresenterSettings, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -170,12 +170,8 @@ pub struct DeviceConfig {
     #[serde(skip_serializing)]
     // Consumed only by the `fs` half's load migration. The field stays in
     // every build: it is part of the shape serde *deserializes*, and dropping
-    // it would turn an old config's key into an unknown field.
-    #[cfg_attr(
-        not(feature = "fs"),
-        expect(clippy::allow_attributes, reason = "see above"),
-        allow(dead_code, reason = "only the `fs` half's load migration reads it")
-    )]
+    // it would turn an old config's key into an unknown field. Without `fs`,
+    // `dead_code` stays quiet because the derived `PartialEq` reads it.
     pub(super) gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right
@@ -273,6 +269,14 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Smooth this device's main wheel in software: the agent diverts the
+    /// wheel's HID++ `0x2121` reports and posts eased scrolling for them, the
+    /// way Logi Options+ "Smooth scrolling" does. Takes effect only while the
+    /// agent may post input events (on macOS, with Accessibility access);
+    /// otherwise the wheel stays native. `false` (default) leaves the wheel
+    /// native, and is omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub smooth_wheel: bool,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -309,6 +313,14 @@ pub struct DeviceConfig {
     /// leave the device's rate alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_rate: Option<ReportRate>,
+    /// Pointer speed of a mouse that scales its own motion (HID++ `0x2205`;
+    /// see [`PointerSpeed`]). The agent writes it when the mouse reconnects
+    /// and when a reload changes it, like [`Self::fn_lock`]. While precision
+    /// mode is on, the mouse moves at [`PointerSpeed::MIN`] instead, and this
+    /// is the speed precision mode returns to. `None` means "never set —
+    /// leave the mouse's speed alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_speed: Option<PointerSpeed>,
 }
 
 impl DeviceConfig {
@@ -407,12 +419,14 @@ impl Default for DeviceConfig {
             thumbwheel_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
+            smooth_wheel: false,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             presenter: PresenterSettings::default(),
             per_app_presenter: BTreeMap::new(),
             keep_os_layout: None,
             report_rate: None,
+            pointer_speed: None,
         }
     }
 }
@@ -530,6 +544,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
     #[serde(default)]
+    smooth_wheel: bool,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -540,6 +556,8 @@ struct RawDeviceConfig {
     keep_os_layout: Option<bool>,
     #[serde(default)]
     report_rate: Option<ReportRate>,
+    #[serde(default)]
+    pointer_speed: Option<PointerSpeed>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -598,12 +616,14 @@ impl From<RawDeviceConfig> for DeviceConfig {
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            smooth_wheel: raw.smooth_wheel,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             presenter: raw.presenter,
             per_app_presenter: raw.per_app_presenter,
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
+            pointer_speed: raw.pointer_speed,
         }
     }
 }

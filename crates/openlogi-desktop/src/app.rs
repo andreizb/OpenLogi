@@ -131,9 +131,6 @@ impl DetailTab {
         if caps.presenter_controls {
             tabs.push(Self::Presenter);
         }
-        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
-            tabs.push(Self::ActionsRing);
-        }
         // The Keys tab needs something to bind: HID++ controls (measured, or
         // last-good for a sleeping keyboard) or the OS-hook F-row a depot
         // without control markers falls back to. A keyboard with neither
@@ -142,13 +139,32 @@ impl DetailTab {
         // rules out Keys even for a kind=Keyboard record — see
         // `can_show_mouse_model` above — so a misclassified mouse gets only
         // the Buttons panel, not both.
-        if matches!(record.kind, DeviceKind::Keyboard)
+        let shows_keys_tab = matches!(record.kind, DeviceKind::Keyboard)
             && !caps.pointer
-            && (caps.buttons || record.asset.is_some())
-        {
+            && (caps.buttons || record.asset.is_some());
+        // Keys goes first for a keyboard: it's the main screen for that device
+        // (and `default_for` picks the first tab), so adding the ring editor
+        // below must not reassign a keyboard's opening tab away from it.
+        if shows_keys_tab {
             tabs.push(Self::Keys);
         }
-        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
+        // A key can be bound to the Actions Ring action from the Keys panel
+        // (it's in the generic action catalog, not gated on haptics or a
+        // mouse model), so any keyboard that gets a Keys tab needs the ring
+        // editor too — otherwise the ring opens but has nothing configured
+        // in it and no way to configure it (#1833).
+        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
+            tabs.push(Self::ActionsRing);
+        }
+        let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION
+            && record.capabilities.is_some()
+            && matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        if caps.pointer
+            || caps.pointer_scaling
+            || caps.scroll_inversion
+            || caps.hires_wheel
+            || has_software_scroll
+        {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
@@ -217,17 +233,26 @@ pub struct AppView {
     active_tab: DetailTab,
 }
 
-/// Open the dialog that says why a device the user asked to forget stayed.
+/// Open the dialog that says why a pairing the user asked to remove stayed —
+/// a forgotten device's, or a leftover slot's.
 fn explain_refused_removals(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Subscription {
-    cx.subscribe_in(state, window, |_, _, event: &StateEvent, window, cx| {
-        if let StateEvent::DeviceRemovalFailed { name, failure } = event {
-            home::open_removal_failed(window, cx, name, failure);
-        }
-    })
+    cx.subscribe_in(
+        state,
+        window,
+        |_, _, event: &StateEvent, window, cx| match event {
+            StateEvent::DeviceRemovalFailed { name, failure } => {
+                home::open_removal_failed(window, cx, name, failure);
+            }
+            StateEvent::StalePairingRemovalFailed { name, failure } => {
+                home::open_stale_pairing_removal_failed(window, cx, name, failure);
+            }
+            _ => {}
+        },
+    )
 }
 
 impl Focusable for AppView {
@@ -313,18 +338,26 @@ impl AppView {
         let is_current =
             |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
         let on_home = matches!(self.route, Route::Home);
+        // The Secure Input bar shows only while a key binding exists, and the
+        // Keys tab's own view repaints only itself.
+        let footer_tracks_bindings = || {
+            AppState::try_read(cx)
+                .and_then(AppState::agent_status)
+                .is_some_and(status::Attention::depends_on_key_bindings)
+        };
         match event {
             StateEvent::AgentChanged
             | StateEvent::InventoryChanged
             | StateEvent::DeviceSelected(_) => true,
             StateEvent::ForegroundChanged => !on_home,
             StateEvent::BindingsChanged(key) => {
-                !on_home
-                    && matches!(
-                        self.active_tab,
-                        DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
-                    )
-                    && is_current(key)
+                footer_tracks_bindings()
+                    || (!on_home
+                        && matches!(
+                            self.active_tab,
+                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
+                        )
+                        && is_current(key))
             }
             StateEvent::DpiChanged(key)
             | StateEvent::FnLockChanged(key)
@@ -348,7 +381,9 @@ impl AppView {
             StateEvent::SmartShiftChanged(_)
             | StateEvent::PresenterChanged(_)
             | StateEvent::ReportRateChanged(_)
+            | StateEvent::PointerSpeedChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
+            | StateEvent::StalePairingRemovalFailed { .. }
             | StateEvent::CameraPermissionChanged
             | StateEvent::DiagnosticsChanged
             | StateEvent::LanguageChanged => false,
@@ -696,9 +731,14 @@ impl AppView {
             )
         };
 
+        let has_key_bindings =
+            AppState::try_read(cx).is_some_and(|state| !state.keyboard_bindings().is_empty());
+        let attention = status::Attention::for_status(&status, has_key_bindings);
         root.child(header_el)
             .child(content_el)
-            .when(!granted, |this| this.child(status::attention_footer(cx)))
+            .when_some(attention, |this, attention| {
+                this.child(status::attention_footer(attention, cx))
+            })
             .into_any_element()
     }
 }

@@ -12,23 +12,29 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
+use openlogi_core::config::{
+    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+};
 use openlogi_core::device::{
-    Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
+    BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
+    LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_core::hid::PresenterSettings;
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
-    ReportRateInfo, WriteError, is_reserved_keyboard_control,
+    DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
+    PointerSpeed, ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
+    is_reserved_keyboard_control,
 };
-use openlogi_ipc::InventoryHealth;
+#[cfg(test)]
+use openlogi_ipc::ChosenLight;
+use openlogi_ipc::{InventoryHealth, LockKeyChange, NoticeKind, SavedConfig};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -38,24 +44,33 @@ use crate::capture_plan::{
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
+    show_precision_led, write_pointer_speed_in_background,
 };
+use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
+use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
-use crate::{DpiCycleState, DpiCycles};
+use crate::watchers::light::{WatchedLight, WatchedLights};
+use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
+mod lights;
+
+pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
 use devices::{
-    RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
-    stable_id,
+    FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
+    VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
+    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
+    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
+    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
+    plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
+    wheel_inverted,
 };
 #[cfg(test)]
 use devices::{battery_needs_alert, reapply_targets};
@@ -87,6 +102,10 @@ struct AgentDevice {
     /// it moves when the device reports a setting changed on it. Comparable
     /// only between snapshots of the same route.
     settings_revision: u64,
+    /// The name the device reports over HID++, for its low-battery notice.
+    codename: Option<String>,
+    /// The device's latest battery reading, `None` when it has none.
+    battery: Option<BatteryInfo>,
 }
 
 /// Cheaply cloneable handles handed to hooks and background managers.
@@ -138,15 +157,22 @@ pub struct SharedHandles {
     transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// The online lights to watch for changes made on the light itself.
+    pub watched_lights: WatchedLights,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: WriteOrder,
     /// Orders the GUI's report-rate writes and the reconnect reapply's per
     /// mouse.
     report_rate_order: WriteOrder,
+    /// Precision mode of the mice whose speed `0x2205` scales, and the order
+    /// of every path's pointer-speed writes.
+    pointer_speeds: Arc<PointerSpeeds>,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
+    /// Orders the `ChangeHost` cookie writes per linked device.
+    follower_cookie_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -246,6 +272,74 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
                 |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
+            .await
+    }
+
+    /// The precision-mode state the action runtime toggles.
+    #[must_use]
+    pub fn pointer_speeds(&self) -> Arc<PointerSpeeds> {
+        Arc::clone(&self.pointer_speeds)
+    }
+
+    /// Write `speed` to the mouse at `route` and return what it reads back.
+    /// The write ends the mouse's precision mode, so the pointer moves at the
+    /// speed the settings app shows, and darkens the DPI LED when the
+    /// precision speed ends with it. It is ordered with the precision button
+    /// and the reconnect reapply as [`Self::set_report_rate`] is ordered:
+    /// a write superseded before its turn reads the mouse instead.
+    pub async fn set_pointer_speed(
+        &self,
+        route: &DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        let AppWrite { ticket, restore } = self
+            .pointer_speeds
+            .app_write(route, SavedSpeed::Scaled(Some(speed)));
+        let speeds = Arc::clone(&self.pointer_speeds);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WritePointerScaling,
+                &ticket,
+                |c| async move {
+                    let started = tokio::time::Instant::now();
+                    let applied = openlogi_hid::set_pointer_speed_on(&c, speed).await?;
+                    if let Some(restore) = restore {
+                        show_precision_led(&c, false, started).await;
+                        speeds.restored(&restore);
+                    }
+                    Ok(applied)
+                },
+                |c| async move { openlogi_hid::get_pointer_speed_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `dpi` to the mouse at `route`. On a DPI mouse the write ends
+    /// precision mode, so the pointer moves at the DPI the settings app
+    /// shows, and darkens the DPI LED when the precision speed ends with it.
+    /// It is ordered with the precision button, the DPI preset actions and
+    /// the reconnect reapply. A write superseded before its turn writes
+    /// nothing.
+    pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
+        let AppWrite { ticket, restore } = self
+            .pointer_speeds
+            .app_write(route, SavedSpeed::Dpi(Some(dpi)));
+        let speeds = Arc::clone(&self.pointer_speeds);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteDpi,
+                &ticket,
+                |c| async move {
+                    let started = tokio::time::Instant::now();
+                    openlogi_hid::set_dpi_on(&c, dpi).await?;
+                    if let Some(restore) = restore {
+                        show_precision_led(&c, false, started).await;
+                        speeds.restored(&restore);
+                    }
+                    Ok(())
+                },
+                |_| async { Ok(()) },
             )
             .await
     }
@@ -354,10 +448,29 @@ pub struct Orchestrator {
     /// Transient manual power choices for camera-linked lights. A camera-use
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
+    /// What each light reached over HID++ last read back, by config key,
+    /// with the route it was read on.
+    light_states: BTreeMap<String, (DeviceRoute, LightState)>,
+    /// Settings changed on each light itself that the config does not hold
+    /// yet, by config key. They stand in for the saved values until a save
+    /// or a GUI write of that control replaces them.
+    lights_changed_on_light: BTreeMap<String, ChangedOnLight>,
+    /// The changes made on lights that GUI writes in flight took, by claim
+    /// ([`LightWriteClaim`]). A reload replaces them as it replaces the
+    /// changes above, and a failed write puts back what is left. A write
+    /// whose RPC is cancelled before it settles leaves its claim here; it is
+    /// never put back.
+    light_writes: BTreeMap<u64, TakenLightChange>,
+    /// The number of the next [`LightWriteClaim`].
+    next_light_write: u64,
     /// The keyboards whose "keep OS layout" is in effect, shared with the
     /// layout writes queued for them so a write withdraws itself once a
     /// reload turns the setting off or disables the device.
     kept_os_layouts: Arc<KeptOsLayouts>,
+    /// The cookie clears that wait for their linked device to be online, and
+    /// the last cookie byte seen for each keyboard. Shared with the cookie
+    /// writes, which return a clear that does not finish.
+    follower_cookies: Arc<Mutex<FollowerCookieState>>,
     /// Whether the OS mouse hook is currently installed. Back/Forward gesture
     /// motion comes from HID++, but diversion is published only while the
     /// broader mouse-remapping path is available so losing the hook leaves the
@@ -368,11 +481,14 @@ pub struct Orchestrator {
     capture_plans_tx: watch::Sender<Arc<CapturePublication>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
+    watched_lights_tx: watch::Sender<Arc<Vec<WatchedLight>>>,
     shared: SharedHandles,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
     /// path — see [`ObservableState`].
     observable: Arc<ObservableState>,
+    /// Which devices' low batteries have been announced.
+    low_battery: LowBatteryWatch,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -414,6 +530,8 @@ impl Orchestrator {
             watch::channel(Arc::new(CapturePublication::default()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
+        openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -434,10 +552,13 @@ impl Orchestrator {
             receiver_access: ReceiverAccess::default(),
             transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
+            watched_lights,
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
+            pointer_speeds: Arc::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
+            follower_cookie_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -455,13 +576,20 @@ impl Orchestrator {
             reapply_followup: HashMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
+            light_states: BTreeMap::new(),
+            lights_changed_on_light: BTreeMap::new(),
+            light_writes: BTreeMap::new(),
+            next_light_write: 0,
             kept_os_layouts: Arc::default(),
+            follower_cookies: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,
             keyboard_spec_tx,
             host_switch_links_tx,
+            watched_lights_tx,
             shared,
             observable,
+            low_battery: LowBatteryWatch::default(),
         };
         orch.rebuild();
         orch.observable
@@ -523,10 +651,14 @@ impl Orchestrator {
         if cfg!(target_os = "macos")
             && let Some(key) = key
         {
-            for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
-                // macOS gives HID++ exclusive ownership of both edges.
-                // Windows deliberately keeps this global map as a passive
-                // fallback when the physical control cannot arm raw XY.
+            for button in hidpp_side_gesture_maps_for(&self.config, key, app)
+                .keys()
+                .filter(|&&button| button != ButtonId::MiddleClick)
+            {
+                // macOS gives HID++ exclusive ownership of both edges of
+                // Back/Forward. Windows, and macOS for the wheel button whose
+                // raw-XY support varies by device, keep this global map as a
+                // passive fallback when the physical control cannot arm raw XY.
                 bindings.remove(button);
                 gestures.remove(button);
             }
@@ -661,6 +793,7 @@ impl Orchestrator {
     fn publish_device_runtime(&self) {
         self.publish_capture_plans();
         self.rebuild_dpi_cycles(self.current_key());
+        self.publish_pointer_speeds(self.current_key());
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -675,6 +808,8 @@ impl Orchestrator {
             host_switch_links(&self.config, &self.devices),
         );
         publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
+        publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
+        self.publish_lights();
     }
 
     fn publish_capture_plans(&self) {
@@ -716,6 +851,29 @@ impl Orchestrator {
         }
         guard.selected = selected.map(str::to_owned);
         guard.by_key = by_key;
+    }
+
+    /// Publish every online, enabled mouse whose speed OpenLogi sets, for
+    /// the precision button. The precision mode of each mouse is kept.
+    fn publish_pointer_speeds(&self, selected: Option<&str>) {
+        self.shared
+            .pointer_speeds
+            .publish(selected, self.speed_mice());
+    }
+
+    /// Every online, enabled mouse whose speed OpenLogi sets, with how it
+    /// sets it and the value saved for it.
+    fn speed_mice(&self) -> impl Iterator<Item = SpeedMouse> + '_ {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter_map(|dev| {
+                Some(SpeedMouse {
+                    key: dev.config_key.clone(),
+                    route: dev.route.clone()?,
+                    saved: saved_speed(&self.config, dev)?,
+                })
+            })
     }
 
     /// Capture plans for enabled devices, and a route for every online device.
@@ -765,6 +923,9 @@ impl Orchestrator {
                 rearm_generation,
             );
             plan.dispatch.pointer_target = pointer_target;
+            plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
+            plan.target.spec.divert_main_wheel =
+                main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)
@@ -825,6 +986,10 @@ impl Orchestrator {
         };
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
+        self.announce_low_batteries(&devices);
+        // Before any cookie plan below: a keyboard that goes to sleep or
+        // leaves later keeps its byte for the clears and links that name it.
+        self.follower_cookies().remember_leads(&devices);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
@@ -853,7 +1018,7 @@ impl Orchestrator {
             }
         }
         for idx in targets {
-            self.reapply_volatile_settings(&devices[idx]);
+            self.reapply_volatile_settings(&devices[idx], &devices);
         }
         let changed = next_current != self.current
             || devices.len() != self.devices.len()
@@ -894,6 +1059,56 @@ impl Orchestrator {
         !self.reapply_followup.is_empty()
     }
 
+    /// Show a lock key a keyboard turned on or off, unless the user turned the
+    /// indicator off or this platform gives the key no meaning.
+    pub fn announce_lock_key(&self, change: LockKeyChange) {
+        let settings = &self.config.app_settings;
+        if !settings.lock_key_notifications || !change.key.is_indicated_here() {
+            return;
+        }
+        debug!(?change, "showing a lock key");
+        self.observable
+            .lock_keys()
+            .show(change, settings.language.clone());
+    }
+
+    /// Post a low-battery notice for each online device whose battery has just
+    /// come to need attention, while the user wants these notices. An offline
+    /// device's reading is only its last known one, and says nothing new.
+    /// While the notices are off, readings are still taken in, muted: a
+    /// recharge in that time ends the device's discharge, and a battery that
+    /// ran low meanwhile is announced on the first reading after they are
+    /// turned on.
+    fn announce_low_batteries(&mut self, devices: &[AgentDevice]) {
+        let announcing = self.config.app_settings.low_battery_notifications;
+        for device in devices.iter().filter(|device| device.online) {
+            let Some(battery) = device.battery.as_ref() else {
+                continue;
+            };
+            if !announcing {
+                self.low_battery.observe_muted(&device.config_key, battery);
+                continue;
+            }
+            if !self.low_battery.observe(&device.config_key, battery) {
+                continue;
+            }
+            let name = self
+                .config
+                .device_custom_name(&device.config_key)
+                .map(str::to_owned)
+                .or_else(|| device.codename.as_deref().map(prettify_codename));
+            info!(device = %device.config_key, ?battery, "announcing a low battery");
+            self.observable.notices().post(
+                NoticeKind::LowBattery {
+                    name,
+                    kind: device.kind,
+                    battery: battery.clone(),
+                },
+                self.config.app_settings.language.clone(),
+            );
+        }
+    }
+
     /// Force a volatile-settings re-apply for every online device on the next
     /// inventory refresh. Called on a detected system wake: the devices were
     /// likely power-cycled during the sleep, but the first post-wake snapshot
@@ -929,7 +1144,12 @@ impl Orchestrator {
     /// thread and one HID++ channel so concurrent multi-open of the same
     /// receiver cannot cross-talk (#485); lighting stays a separate path
     /// (keyboards / different feature).
-    fn reapply_volatile_settings(&self, dev: &AgentDevice) {
+    ///
+    /// `devices` is the inventory that `dev` comes from. The cookie plan reads
+    /// it, not `self.devices`, which still holds the previous inventory while
+    /// [`Self::refresh_inventory`] runs: there `dev` and the keyboards that
+    /// came online with it would still look offline.
+    fn reapply_volatile_settings(&self, dev: &AgentDevice, devices: &[AgentDevice]) {
         // A disabled device is left fully native — no writes of any kind.
         if !self.config.device_enabled(&dev.config_key) {
             return;
@@ -940,9 +1160,18 @@ impl Orchestrator {
         let key = &dev.config_key;
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
+        let saved = saved_speed(&self.config, dev);
+        let speed_write =
+            saved.and_then(|saved| self.shared.pointer_speeds.reapply(key, &route, saved));
+        // A DPI mouse gets its DPI from `speed_write`, numbered with the
+        // precision presses and the settings-app writes, so a newer one
+        // supersedes it. The volatile reapply leaves the DPI out then.
+        let dpi_overridden = matches!(saved, Some(SavedSpeed::Dpi(_))) && speed_write.is_some();
         let settings = VolatileMouseSettings {
-            wheel: configured_wheel_mode(&self.config, dev),
-            dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            wheel: self.wheel_mode_change(dev),
+            dpi: device
+                .and_then(|d| d.effective_dpi(&route_key))
+                .filter(|_| !dpi_overridden),
             report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
@@ -953,6 +1182,7 @@ impl Orchestrator {
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
+                &self.shared.capture_plans,
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device
@@ -964,6 +1194,9 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        if let Some(write) = speed_write {
+            self.write_pointer_speed(write);
+        }
         self.keep_os_layout(dev);
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
@@ -972,6 +1205,38 @@ impl Orchestrator {
                 .hardware
                 .set_light_in_background(Some(route), &light, capabilities);
         }
+        let writes =
+            reconnect_follower_cookies(&self.config, devices, dev, &mut self.follower_cookies());
+        self.write_follower_cookies(writes);
+    }
+
+    /// Write the `ChangeHost` cookies of linked pointing devices, so that Logi
+    /// Options+ on a keyboard's other hosts moves the same devices.
+    fn write_follower_cookies(&self, writes: Vec<FollowerCookieWrite>) {
+        for write in writes {
+            let state = Arc::clone(&self.follower_cookies);
+            let key = write.key;
+            crate::hardware::write_follower_cookies_in_background(
+                self.shared.device(&write.follower),
+                self.shared.follower_cookie_order.request(&write.follower),
+                write.release,
+                write.link,
+                move |leads| {
+                    state
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .requeue(&key, leads);
+                },
+            );
+        }
+    }
+
+    /// The held cookie clears and the known keyboard bytes. A panic while the
+    /// state was held leaves at worst a clear too many or too few.
+    fn follower_cookies(&self) -> MutexGuard<'_, FollowerCookieState> {
+        self.follower_cookies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
@@ -1026,10 +1291,14 @@ impl Orchestrator {
         info!(previous = ?previous, active, lights = applied, "applied camera-linked light state");
     }
 
-    /// Resolve settings for reconnect/config re-application. Camera policy and
-    /// a transient manual override replace only the effective power field.
+    /// Resolve settings for reconnect/config re-application. A value changed
+    /// on the light itself stands in for the saved one; camera policy and a
+    /// transient manual override then replace only the effective power field.
     fn effective_light_settings(&self, key: &str) -> Option<LightSettings> {
         let mut light = self.config.light(key)?;
+        if let Some(changed) = self.lights_changed_on_light.get(key) {
+            light.apply_changes_on_light(*changed);
+        }
         if light.auto_camera {
             if let Some(override_enabled) = self.manual_light_overrides.get(key) {
                 light.enabled = *override_enabled;
@@ -1068,15 +1337,25 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let Some(change) = configured_wheel_mode(&self.config, dev) else {
+            let Some(change) = self.wheel_mode_change(dev) else {
                 debug!("no configured wheel mode fields — write skipped");
                 continue;
             };
             crate::hardware::write_scroll_wheel_mode_in_background(
                 self.shared.device(&route),
                 change,
+                self.shared.capture_plans.clone(),
             );
         }
+    }
+
+    /// The native wheel mode the agent's own writes (the reconnect re-apply
+    /// and the reload push) give `dev`, or `None` for no write. That includes
+    /// a wheel its capture session diverts: the session writes the same
+    /// fields with its divert, and a write here would select native
+    /// reporting under it.
+    fn wheel_mode_change(&self, dev: &AgentDevice) -> Option<crate::hardware::WheelModeChange> {
+        configured_wheel_mode(&self.config, dev, self.os_mouse_hook_available)
     }
 
     /// The latest inventory snapshot (for the IPC `inventory()` poll). Empty
@@ -1117,7 +1396,7 @@ impl Orchestrator {
         if !ring.enabled {
             return None;
         }
-        let layout = ring.effective_layout(self.current_app.as_deref());
+        let layout = ring.effective_layout(&self.config.apps, self.current_app.as_deref());
         if layout.slots.is_empty() {
             return None;
         }
@@ -1225,20 +1504,31 @@ impl Orchestrator {
     /// divert set is part of its identity) over nothing. The observable cell
     /// still gets the whole value — it dedupes on its own, and its recent list
     /// is the only source a client has for these identifiers. Returns whether
-    /// the effective app identifier changed and active button lifecycles must
-    /// be canceled.
+    /// the app changed in a way that alters bindings (the old or new app has a
+    /// per-app override), so active button lifecycles must be canceled.
     pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> bool {
         let id = app.as_ref().map(|app| app.id.clone());
         self.observable.set_foreground(app);
         if id == self.current_app {
             return false;
         }
-        self.current_app = id;
+        let previous = std::mem::replace(&mut self.current_app, id);
         self.publish_hook_maps(self.hook_maps_for(self.current_key()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
-        true
+        // Only a per-app override on either side changes what a held button
+        // resolves to. Without one, keep the hold: a gesture that switches
+        // desktops changes the front app and must not end its own hold (#1634).
+        let overridden = |app: Option<&str>| {
+            app.is_some_and(|app| {
+                self.config
+                    .devices
+                    .keys()
+                    .any(|key| self.config.has_app_override(key, app))
+            })
+        };
+        overridden(previous.as_deref()) || overridden(self.current_app.as_deref())
     }
 
     /// Publish a pointer-window change separately from keyboard focus. The
@@ -1259,14 +1549,65 @@ impl Orchestrator {
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
+    /// The file is one the agent did not see saved, as at startup or after a
+    /// hand edit (see [`ConfigSource::Loaded`]).
     pub fn reload_config(&mut self, config: Config) {
+        self.reload_from(config, ConfigSource::Loaded);
+    }
+
+    /// [`Self::reload_config`] after the GUI saved `saved`, with `config`
+    /// read from a file at revision `read`. A file still at the revision the
+    /// GUI wrote is its save; another was edited since, and loads as
+    /// [`Self::reload_config`] loads it (see [`ConfigSource::of_saved`]).
+    pub fn reload_saved_config(
+        &mut self,
+        config: Config,
+        read: ConfigRevision,
+        saved: &SavedConfig,
+    ) {
+        self.reload_from(config, ConfigSource::of_saved(read, saved));
+    }
+
+    /// Replace the config from `source` and write each light it changed.
+    fn reload_from(&mut self, config: Config, source: ConfigSource<'_>) {
+        let writes = self.replace_config_from(config, source);
+        self.write_lights(writes);
+    }
+
+    fn write_lights(&self, writes: Vec<LightWrite>) {
+        for write in writes {
+            self.shared.hardware.set_light_in_background(
+                Some(write.route),
+                &write.light,
+                write.capabilities,
+            );
+        }
+    }
+
+    /// Everything [`Self::reload_config`] does except the light writes, which
+    /// it returns instead: one per online light whose settings changed.
+    #[cfg(test)]
+    fn replace_config(&mut self, config: Config) -> Vec<LightWrite> {
+        self.replace_config_from(config, ConfigSource::Loaded)
+    }
+
+    /// [`Self::replace_config`] for [`Self::reload_saved_config`].
+    #[cfg(test)]
+    fn replace_saved_config(&mut self, config: Config, chosen: &[ChosenLight]) -> Vec<LightWrite> {
+        self.replace_config_from(config, ConfigSource::Saved { chosen })
+    }
+
+    fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<LightWrite> {
+        let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
+        self.forget_saved_light_changes(&previous, source);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.shared.scroll_preferences.publish(
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
         );
+        openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
@@ -1285,8 +1626,16 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
-        self.reapply_light_settings();
+        let writes = changed_follower_cookies(
+            &previous,
+            &self.config,
+            &self.devices,
+            &mut self.follower_cookies(),
+        );
+        self.write_follower_cookies(writes);
+        self.changed_lights(&previous_lights)
     }
 
     /// Put each keyboard whose "keep OS layout" just took effect — turned on,
@@ -1323,24 +1672,110 @@ impl Orchestrator {
         }
     }
 
-    /// Re-apply standalone-light settings after a config reload.
-    fn reapply_light_settings(&self) {
-        for dev in self
+    /// End precision mode on every mouse whose speed, DPI or button
+    /// assignments the reload changed, online or not, and push the resulting
+    /// speed to the online ones (see [`crate::pointer_speed`]). An unrelated
+    /// save writes nothing, as for [`Self::apply_changed_fn_locks`].
+    fn apply_changed_pointer_speeds(&self, previous: &Config) {
+        // A DPI is saved per link, so it is compared for the link each known
+        // mouse is on.
+        let dpi_changed: HashSet<&str> = self
             .devices
             .iter()
-            .filter(|dev| dev.online && dev.route.is_some() && dev.light_capabilities.is_some())
-        {
-            if let (Some(light), Some(capabilities)) = (
-                self.effective_light_settings(&dev.config_key),
-                dev.light_capabilities,
-            ) {
-                self.shared.hardware.set_light_in_background(
-                    dev.route.clone(),
-                    &light,
-                    capabilities,
-                );
-            }
+            .filter(|dev| configured_dpi(previous, dev) != configured_dpi(&self.config, dev))
+            .map(|dev| dev.config_key.as_str())
+            .collect();
+        let change = |key: &str| ReloadChange {
+            speed: self.config.pointer_speed(key) != previous.pointer_speed(key)
+                || dpi_changed.contains(key),
+            assignments: assignments_changed(previous, &self.config, key),
+        };
+        for write in self.shared.pointer_speeds.reload(change, self.speed_mice()) {
+            self.write_pointer_speed(write);
         }
+    }
+
+    fn write_pointer_speed(&self, write: SpeedWrite) {
+        let SpeedWrite {
+            route,
+            target,
+            ticket,
+            restore,
+            led,
+        } = write;
+        let speeds = Arc::clone(&self.shared.pointer_speeds);
+        write_pointer_speed_in_background(
+            self.shared.device(&route),
+            ticket,
+            target,
+            led,
+            move || {
+                if let Some(restore) = restore {
+                    speeds.restored(&restore);
+                }
+            },
+        );
+    }
+
+    /// The effective settings of every online standalone light, keyed by its
+    /// config key: what [`Self::changed_lights`] compares a reload against.
+    fn effective_online_lights(&self) -> HashMap<String, LightSettings> {
+        self.online_lights()
+            .filter_map(|(dev, _, _)| {
+                let light = self.effective_light_settings(&dev.config_key)?;
+                Some((dev.config_key.clone(), light))
+            })
+            .collect()
+    }
+
+    /// The online lights a config reload has to write: those whose effective
+    /// settings now send other commands than they did in `previous`. Only a
+    /// changed light is written, so an unrelated save never undoes a change
+    /// made on the light itself — the same rule as
+    /// [`Self::apply_changed_fn_locks`]. A flipped camera policy or a dropped
+    /// manual override changes the effective power, so it is written too.
+    fn changed_lights(&self, previous: &HashMap<String, LightSettings>) -> Vec<LightWrite> {
+        self.online_lights()
+            .filter_map(|(dev, route, capabilities)| {
+                let light = self.effective_light_settings(&dev.config_key)?;
+                let unchanged = previous.get(&dev.config_key).is_some_and(|before| {
+                    commands_for_light_settings(*before, capabilities)
+                        == commands_for_light_settings(light, capabilities)
+                });
+                (!unchanged).then(|| LightWrite {
+                    route: route.clone(),
+                    light,
+                    capabilities,
+                })
+            })
+            .collect()
+    }
+
+    /// Every online device with a route and standalone-light controls.
+    fn online_lights(
+        &self,
+    ) -> impl Iterator<Item = (&AgentDevice, &DeviceRoute, LightCapabilities)> {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online)
+            .filter_map(|dev| Some((dev, dev.route.as_ref()?, dev.light_capabilities?)))
+    }
+}
+
+/// One standalone-light write a config reload queues.
+#[derive(Debug, PartialEq)]
+struct LightWrite {
+    route: DeviceRoute,
+    light: LightSettings,
+    capabilities: LightCapabilities,
+}
+
+/// How Previous and Next Desktop switch under `settings`.
+fn desktop_switch(settings: &AppSettings) -> openlogi_inject::DesktopSwitch {
+    if settings.animate_desktop_switch {
+        openlogi_inject::DesktopSwitch::Animated
+    } else {
+        openlogi_inject::DesktopSwitch::Instant
     }
 }
 

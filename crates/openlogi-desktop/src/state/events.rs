@@ -37,6 +37,12 @@ pub(crate) enum StateEvent {
         name: String,
         failure: UnpairFailure,
     },
+    /// A leftover pairing the user asked to remove stayed on its receiver.
+    StalePairingRemovalFailed {
+        /// The device's display name.
+        name: String,
+        failure: UnpairFailure,
+    },
     /// The active device changed.
     DeviceSelected(DeviceKey),
     /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
@@ -51,6 +57,8 @@ pub(crate) enum StateEvent {
     FnLockChanged(DeviceKey),
     /// The mouse's report-rate read landed or changed.
     ReportRateChanged(DeviceKey),
+    /// The mouse's pointer-speed read landed or changed.
+    PointerSpeedChanged(DeviceKey),
     /// The keyboard's backlight read landed or changed.
     BacklightChanged(DeviceKey),
     /// The device's Easy-Switch host read landed or changed.
@@ -89,6 +97,7 @@ impl StateEvent {
             | Self::PresenterChanged(key)
             | Self::FnLockChanged(key)
             | Self::ReportRateChanged(key)
+            | Self::PointerSpeedChanged(key)
             | Self::BacklightChanged(key)
             | Self::EasySwitchChanged(key)
             | Self::LightingChanged(key)
@@ -98,6 +107,7 @@ impl StateEvent {
             | Self::DiagnosticsChanged
             | Self::InventoryChanged
             | Self::DeviceRemovalFailed { .. }
+            | Self::StalePairingRemovalFailed { .. }
             | Self::CameraChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
@@ -227,7 +237,8 @@ impl AppState {
         match event {
             StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
             // A dialog, not panel content.
-            StateEvent::DeviceRemovalFailed { .. } => false,
+            StateEvent::DeviceRemovalFailed { .. }
+            | StateEvent::StalePairingRemovalFailed { .. } => false,
             StateEvent::AgentChanged
             | StateEvent::ForegroundChanged
             | StateEvent::DiagnosticsChanged
@@ -237,6 +248,7 @@ impl AppState {
             | StateEvent::PresenterChanged(_)
             | StateEvent::FnLockChanged(_)
             | StateEvent::ReportRateChanged(_)
+            | StateEvent::PointerSpeedChanged(_)
             | StateEvent::BacklightChanged(_)
             | StateEvent::EasySwitchChanged(_)
             | StateEvent::LightingChanged(_)

@@ -34,6 +34,83 @@ fn bolt_probe_is_complete_when_count_matches_readable_slots() {
 }
 
 #[test]
+fn bolt_probe_suppresses_offline_duplicate_pairing_slot() {
+    let unit_id = [0x4e, 0x51, 0x01, 0xc4];
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        Some(2),
+        vec![
+            bolt_slot_with_identity(2, unit_id, true),
+            bolt_slot_with_identity(3, unit_id, false),
+        ],
+    );
+
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Healthy { complete: true },
+        "deduplication must not make a complete walk unhealthy"
+    );
+    assert_eq!(paired_slots(&probe), vec![2], "the online slot wins");
+    assert_eq!(
+        probe.outcomes.len(),
+        2,
+        "both raw slots still contribute their cache outcome"
+    );
+}
+
+#[test]
+fn bolt_probe_replaces_earlier_offline_duplicate_with_online_slot() {
+    let unit_id = [0x4e, 0x51, 0x01, 0xc4];
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        Some(2),
+        vec![
+            bolt_slot_with_identity(2, unit_id, false),
+            bolt_slot_with_identity(3, unit_id, true),
+        ],
+    );
+
+    assert_eq!(
+        paired_slots(&probe),
+        vec![3],
+        "a later online slot replaces the stale route"
+    );
+}
+
+#[test]
+fn bolt_probe_keeps_distinct_units_of_the_same_model() {
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        Some(2),
+        vec![
+            bolt_slot_with_identity(2, [1, 2, 3, 4], true),
+            bolt_slot_with_identity(3, [1, 2, 3, 5], false),
+        ],
+    );
+
+    assert_eq!(
+        paired_slots(&probe),
+        vec![2, 3],
+        "model equality without physical-identity equality is not enough to merge devices"
+    );
+}
+
+#[test]
+fn bolt_probe_keeps_unkeyed_slots_separate() {
+    let unkeyed = |slot| {
+        let (device, _) = bolt_slot_with_identity(slot, [0; 4], false);
+        (device, CacheOutcome::Unkeyed)
+    };
+    let probe = assemble_bolt_probe(bolt_receiver_info(), Some(2), vec![unkeyed(2), unkeyed(3)]);
+
+    assert_eq!(
+        paired_slots(&probe),
+        vec![2, 3],
+        "all-zero identities are not strong enough to deduplicate"
+    );
+}
+
+#[test]
 fn bolt_probe_is_incomplete_when_a_counted_slot_is_unreadable() {
     // The receiver reports two paired devices but only one slot's pairing
     // register read this tick. Presenting that partial walk as the new truth is
@@ -279,4 +356,136 @@ async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
 
     assert_eq!(probe.verdict, ProbeVerdict::Failed);
     assert!(probe.inventory.is_none());
+}
+
+/// [`bolt_receiver_with_a_silent_slot`], but slot 1's codename register holds
+/// a 14-byte name and so returns only its first 13 bytes (#1960).
+fn bolt_receiver_with_a_truncated_codename(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xb5, 0x61, ..] = *request {
+        let mut report = vec![0x11, 0xff, 0x83, 0xb5, 0x61, 0x01, 14];
+        report.extend_from_slice(b"MX Anywhere 3");
+        return Some(report);
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// [`bolt_receiver_with_a_silent_slot`], but slot 1's codename register holds
+/// "MX Anywhere 3S" and answers each chunk read the way a Bolt receiver does
+/// (#1962): chunk `0x01` with the length and 13 bytes, chunk `0x02` with the
+/// rest.
+fn bolt_receiver_with_a_two_chunk_codename(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xb5, 0x61, chunk, ..] = *request {
+        let mut report = vec![0x11, 0xff, 0x83, 0xb5, 0x61, chunk];
+        match chunk {
+            0x01 => {
+                report.push(14);
+                report.extend_from_slice(b"MX Anywhere 3");
+            }
+            0x02 => report.push(b'S'),
+            _ => return None,
+        }
+        report.resize(20, 0);
+        return Some(report);
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// With no `0x0005` name to prefer, the receiver register's two chunks still
+/// give the whole name.
+#[tokio::test]
+async fn a_bolt_slot_without_a_marketing_name_reads_both_codename_chunks() {
+    let info = bolt_receiver_node("two-chunk-codename");
+    let timeouts = quick_timeouts();
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_two_chunk_codename);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (_, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    let inventory = probe.inventory.expect("the receiver answered");
+    assert_eq!(
+        inventory.paired[0].codename.as_deref(),
+        Some("MX Anywhere 3S")
+    );
+}
+
+/// The receiver register truncates a long name; the device's own `0x0005`
+/// name, here from a fresh cache entry, is whole and wins.
+#[tokio::test]
+async fn a_bolt_slot_is_named_by_its_marketing_name_over_the_truncated_register() {
+    let info = bolt_receiver_node("truncated-codename");
+    let timeouts = quick_timeouts();
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_truncated_codename);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let mut entry = cache_entry();
+    entry.probe = probed(Some(model(SILENT_SLOT_UNIT_ID, Some("SN-1"))), false);
+    entry.probe.marketing_name = Some("MX Anywhere 3S".to_owned());
+    let cache = HashMap::from([(
+        CacheKey::Bolt {
+            unit_id: SILENT_SLOT_UNIT_ID,
+        },
+        entry,
+    )]);
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    let inventory = probe.inventory.expect("the receiver answered");
+    assert_eq!(
+        inventory.paired[0].codename.as_deref(),
+        Some("MX Anywhere 3S")
+    );
+}
+
+/// [`bolt_receiver_with_a_two_chunk_codename`], but the reply to chunk `0x02`
+/// is lost.
+fn bolt_receiver_losing_the_second_codename_chunk(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xb5, 0x61, 0x02, ..] = *request {
+        return None;
+    }
+    bolt_receiver_with_a_two_chunk_codename(request)
+}
+
+/// A lost reply to the optional second codename chunk costs a short wait
+/// (plus the next register read's stale-reply grace), not the channel's
+/// five-second default: the receiver probe still finishes inside a budget the
+/// default alone would overrun, and the slot keeps the name's first 13 bytes.
+#[tokio::test]
+async fn a_lost_second_codename_chunk_keeps_the_probe_inside_its_budget() {
+    let info = bolt_receiver_node("lost-codename-chunk");
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(3),
+        ..quick_timeouts()
+    };
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_losing_the_second_codename_chunk);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (_, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    let inventory = probe.inventory.expect("the receiver answered");
+    assert_eq!(
+        inventory.paired[0].codename.as_deref(),
+        Some("MX Anywhere 3")
+    );
 }

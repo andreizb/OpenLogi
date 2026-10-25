@@ -10,7 +10,10 @@ use crate::hid::DeviceRoute;
 
 mod light;
 
-pub use light::{LightCapabilities, LightValueRange, LightValueRangeError, LightValueUnit};
+pub use light::{
+    ChangedOnLight, LightCapabilities, LightState, LightValueRange, LightValueRangeError,
+    LightValueUnit,
+};
 
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`
 /// but is owned by us so consumers don't depend on `hidpp`.
@@ -84,6 +87,28 @@ impl DeviceKind {
             "camera" => Some(Self::Camera),
             "light" | "lighting" | "illumination_light" => Some(Self::Light),
             _ => None,
+        }
+    }
+
+    /// Stable catalog key for the localized name of the kind, shared by every
+    /// binary that names a device by what it is.
+    #[must_use]
+    pub const fn translation_key(self) -> &'static str {
+        match self {
+            Self::Mouse => "device.mouse",
+            Self::Keyboard => "device.keyboard",
+            Self::Numpad => "device.numpad",
+            Self::Presenter => "device.presenter",
+            Self::Remote => "device.remote",
+            Self::Trackball => "device.trackball",
+            Self::Touchpad => "device.touchpad",
+            Self::Tablet => "device.tablet",
+            Self::Gamepad => "device.gamepad",
+            Self::Joystick => "device.joystick",
+            Self::Headset => "device.headset",
+            Self::Camera => "camera.camera",
+            Self::Unknown => "device.device",
+            Self::Light => "device.lighting",
         }
     }
 }
@@ -162,6 +187,19 @@ pub struct Capabilities {
     /// IPC and the persisted identity.
     #[serde(default)]
     pub easy_switch: bool,
+    /// Back or Forward in the device's `0x1b04` control table can be diverted
+    /// with raw-wheel reporting, so a wheel-hold binding can turn the main
+    /// wheel into a virtual thumb wheel. Appended: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub virtual_thumbwheel: bool,
+    /// The pointer speed is set by scaling the sensor's motion — HID++
+    /// `0x2205 PointerMotionScaling` — because the device has no adjustable
+    /// DPI. A device that also reports [`Self::pointer`] keeps it `false`:
+    /// the DPI control already sets its speed, and Logi Options+ uses DPI
+    /// there too. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub pointer_scaling: bool,
 }
 
 impl Capabilities {
@@ -176,9 +214,10 @@ impl Capabilities {
         // lighting: `backlight` below covers 0x1982.
         const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8081, 0x8080];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
+        let pointer = has(&POINTER);
         Self {
             buttons: has(&BUTTONS),
-            pointer: has(&POINTER),
+            pointer,
             lighting: has(&LIGHTING),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
@@ -197,6 +236,10 @@ impl Capabilities {
             report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
             backlight: ids.contains(&0x1982),
             easy_switch: ids.contains(&0x1815),
+            // Set by the `0x1b04` control walk; the feature table alone
+            // cannot say which controls report raw wheel.
+            virtual_thumbwheel: false,
+            pointer_scaling: !pointer && ids.contains(&0x2205),
         }
     }
 
@@ -280,6 +323,85 @@ pub struct BatteryInfo {
     pub level: BatteryLevel,
     /// Charging state at poll time.
     pub status: BatteryStatus,
+}
+
+/// The charge at or below which a discharging battery needs attention.
+const LOW_BATTERY_PERCENT: u8 = 20;
+
+impl BatteryInfo {
+    /// Whether this reading should draw the user's attention: a discharging
+    /// battery at 20% or less, or, on a device that reports no percentage, at
+    /// the firmware's low or critical level.
+    ///
+    /// Every low-battery cue asks this one rule: the settings app's warning
+    /// tone and caption, and the agent's low-battery notice.
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        let low = match self.percentage {
+            Some(percentage) => percentage <= LOW_BATTERY_PERCENT,
+            None => matches!(self.level, BatteryLevel::Low | BatteryLevel::Critical),
+        };
+        low && !matches!(
+            self.status,
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
+        )
+    }
+}
+
+/// Tidy a device name reported over HID++ for display.
+///
+/// Logitech reports gaming names in ALL CAPS (e.g. `"G513 RGB MECHANICAL
+/// GAMING KEYBOARD"`). This title-cases each word so the name reads like the
+/// curated asset names (`"MX Master 3S"`), and keeps model numbers (tokens
+/// with a digit, e.g. `G513`) and short acronyms (`RGB`, `TKL`, `SE`) as they
+/// are. A name already in mixed case is returned unchanged.
+#[must_use]
+pub fn prettify_codename(raw: &str) -> String {
+    if raw.chars().any(char::is_lowercase) {
+        return raw.to_string();
+    }
+    raw.split_whitespace()
+        .map(|word| {
+            if word.len() <= 3 || word.bytes().any(|b| b.is_ascii_digit()) {
+                word.to_string()
+            } else {
+                let mut chars = word.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                })
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A keyboard lock key whose state the on-screen indicator reports.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LockKey {
+    /// Num Lock.
+    NumLock,
+    /// Caps Lock.
+    CapsLock,
+    /// Scroll Lock.
+    ScrollLock,
+}
+
+impl LockKey {
+    /// Whether this platform shows the indicator for this key.
+    ///
+    /// Caps Lock shows everywhere. macOS gives Num Lock and Scroll Lock no
+    /// meaning, so they show only on the other platforms. Logi Options+ marks
+    /// both Windows-only; it ships for Windows and macOS only, and Linux treats
+    /// these keys as Windows does.
+    #[must_use]
+    pub const fn is_indicated_here(self) -> bool {
+        match self {
+            Self::CapsLock => true,
+            Self::NumLock | Self::ScrollLock => !cfg!(target_os = "macos"),
+        }
+    }
 }
 
 /// Identity of an enumerated receiver — no paired-device state (that lives
@@ -544,9 +666,53 @@ pub struct DeviceInventory {
 mod tests {
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, ModelTransport,
-        PairedDevice, ReceiverInfo,
+        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
+        ModelTransport, PairedDevice, ReceiverInfo, prettify_codename,
     };
+
+    #[test]
+    fn a_low_discharging_battery_needs_attention() {
+        let battery = |percentage, level, status| BatteryInfo {
+            percentage,
+            level,
+            status,
+        };
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+
+        assert!(battery(Some(20), good, discharging).needs_attention());
+        assert!(battery(Some(0), good, discharging).needs_attention());
+        assert!(!battery(Some(21), BatteryLevel::Low, discharging).needs_attention());
+        // A percentage decides on its own; the level only stands in for one.
+        assert!(!battery(None, good, discharging).needs_attention());
+        assert!(battery(None, BatteryLevel::Low, discharging).needs_attention());
+        assert!(battery(None, BatteryLevel::Critical, discharging).needs_attention());
+        assert!(!battery(None, BatteryLevel::Unknown, discharging).needs_attention());
+        assert!(battery(Some(10), good, BatteryStatus::Unknown).needs_attention());
+        assert!(battery(Some(10), good, BatteryStatus::Error).needs_attention());
+        for powered in [
+            BatteryStatus::Charging,
+            BatteryStatus::ChargingSlow,
+            BatteryStatus::Full,
+        ] {
+            assert!(
+                !battery(Some(5), BatteryLevel::Critical, powered).needs_attention(),
+                "{powered:?} is already being charged"
+            );
+            assert!(!battery(None, BatteryLevel::Critical, powered).needs_attention());
+        }
+    }
+
+    #[test]
+    fn prettify_codename_title_cases_shouted_names_only() {
+        assert_eq!(
+            prettify_codename("G513 RGB MECHANICAL GAMING KEYBOARD"),
+            "G513 RGB Mechanical Gaming Keyboard"
+        );
+        assert_eq!(prettify_codename("PRO X  SUPERLIGHT"), "PRO X Superlight");
+        assert_eq!(prettify_codename("MX Master 3S"), "MX Master 3S");
+        assert_eq!(prettify_codename(""), "");
+    }
 
     fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
         DeviceInventory {
@@ -596,6 +762,8 @@ mod tests {
                     report_rate: false,
                     backlight: false,
                     easy_switch: false,
+                    virtual_thumbwheel: false,
+                    pointer_scaling: false,
                 }),
                 settings_revision: 0,
             }],
@@ -714,6 +882,8 @@ mod tests {
                 report_rate: false,
                 backlight: false,
                 easy_switch: false,
+                virtual_thumbwheel: false,
+                pointer_scaling: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -737,6 +907,8 @@ mod tests {
                 report_rate: false,
                 backlight: false,
                 easy_switch: false,
+                virtual_thumbwheel: false,
+                pointer_scaling: false,
             }
         );
         // No driving features → nothing offered.
@@ -758,6 +930,12 @@ mod tests {
         // alone switches channels but cannot name them.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
+        // 0x2205 sets the speed only where no DPI feature does (M590, MX
+        // Ergo); a mouse with both keeps its DPI control.
+        let scaled = Capabilities::from_feature_ids(&[0x0001, 0x2205]);
+        assert!(scaled.pointer_scaling && !scaled.pointer);
+        let both = Capabilities::from_feature_ids(&[0x0001, 0x2201, 0x2205]);
+        assert!(both.pointer && !both.pointer_scaling);
     }
 
     #[test]
@@ -848,5 +1026,17 @@ mod tests {
             "min = 2700\nmax = 6500\nstep = 0\nunit = 'kelvin'\n",
         );
         result.expect_err("a zero step must not survive deserialization");
+    }
+
+    #[test]
+    fn caps_lock_shows_everywhere_and_num_and_scroll_lock_not_on_macos() {
+        assert!(LockKey::CapsLock.is_indicated_here());
+        for key in [LockKey::NumLock, LockKey::ScrollLock] {
+            assert_eq!(
+                key.is_indicated_here(),
+                !cfg!(target_os = "macos"),
+                "{key:?}"
+            );
+        }
     }
 }

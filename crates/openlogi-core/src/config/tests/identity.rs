@@ -28,6 +28,8 @@ fn device_identity_roundtrips_and_is_iterable() {
             report_rate: false,
             backlight: false,
             easy_switch: false,
+            virtual_thumbwheel: false,
+            pointer_scaling: false,
         },
         light_capabilities: None,
         driver_id: None,

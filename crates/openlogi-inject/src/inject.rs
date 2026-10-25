@@ -20,6 +20,8 @@ use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
 
 #[cfg(any(target_os = "macos", test))]
 mod space_switch;
@@ -266,8 +268,11 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// handled at the hook/HID layer, logging a trace here.
 ///
 /// macOS `PreviousDesktop` / `NextDesktop` send a DockSwipe without modifying
-/// system shortcuts. This call waits for posting (or cancellation), preserving
-/// event order for sequential callers, but not for the desktop animation to end.
+/// system shortcuts: two frames that switch at once, or, with
+/// [`DesktopSwitch::Animated`], a timed series of frames the Dock slides along
+/// (see [`set_desktop_switch`]). This call waits for posting (or
+/// cancellation), including every frame of a slide, preserving event order
+/// for sequential callers, but not for the Dock's animation to end.
 /// A dedicated worker confirms the pointer display's Space; the process must
 /// remain alive to receive that diagnostic. Overlapping switches are skipped,
 /// not queued. Call from an action worker, never an input-tap callback.
@@ -277,11 +282,16 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// is not a hard wall-clock limit on `execute`.
 ///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
-/// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
-/// manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
-/// `LaunchpadShow`) have no universal Linux equivalent and are silently
-/// skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to
-/// Linux key codes; macOS Cmd maps to Ctrl.
+/// virtual device. Mouse clicks inject `BTN_*` events. When
+/// `HYPRLAND_INSTANCE_SIGNATURE` is non-empty, `LaunchpadShow` runs
+/// `omarchy-menu toggle`, desktop switches run `hyprctl dispatch workspace`,
+/// and `LockScreen` runs `omarchy-system-lock` when available (never Super+L;
+/// the fallback is Super+Ctrl+L). Helpers run asynchronously with a bounded
+/// wait, then fall back to their compositor shortcut. Otherwise macOS-only
+/// window manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
+/// `LaunchpadShow`) have no universal Linux equivalent and are silently skipped
+/// (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to Linux key codes;
+/// macOS Cmd maps to Ctrl.
 ///
 /// On Windows, key and mouse events are synthesised via `SendInput`. The
 /// macOS window-manager actions map to their Windows equivalents (e.g.
@@ -362,7 +372,31 @@ pub fn move_pointer_by(dx: i32, dy: i32) {
     }
 }
 
-/// Synthesise the down edge of `combo`, leaving its output held.
+/// How [`Action::PreviousDesktop`] and [`Action::NextDesktop`] reach the
+/// neighbouring desktop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesktopSwitch {
+    /// Switch at once, with no slide.
+    Instant,
+    /// Slide over the way a three-finger swipe does. macOS types the user's
+    /// Space shortcut for the Dock's own slide, or posts swipe frames when
+    /// that shortcut is off. Elsewhere this switches like [`Self::Instant`].
+    Animated,
+}
+
+/// Choose how later [`Action::PreviousDesktop`] and [`Action::NextDesktop`]
+/// actions switch. They switch instantly until a host calls this; a switch
+/// already under way keeps the style it started with.
+pub fn set_desktop_switch(switch: DesktopSwitch) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::set_desktop_switch(switch);
+        }
+        _ => {
+            let _ = switch;
+        }
+    }
+}
 /// One synthetic held chord, released exactly once when dropped.
 ///
 /// Keep this value with the physical press lifecycle. Replacing its chord
@@ -467,6 +501,18 @@ fn hold_transition(
     }
 }
 
+/// Run `post` with the synthetic modifiers held chords keep down, under the
+/// lock that orders held-chord edges.
+///
+/// A one-shot keystroke posted through this sees exactly which modifiers held
+/// chords own, restores any it lifts before returning, and never interleaves
+/// with a held transition.
+#[cfg(target_os = "macos")]
+fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    post(output.modifiers())
+}
+
 /// Let the frontmost app's menus answer shortcuts the keyboard layout
 /// remaps, such as Back and Forward on Spanish or German layouts. Call once
 /// on the main thread before its run loop starts.
@@ -531,6 +577,27 @@ fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
     let output = rounded as i32;
     *residual = exact - f64::from(output);
     output
+}
+
+/// Whether the OS reverses the scrolling a mouse wheel produces — macOS's
+/// "Natural scrolling", on by default — read fresh on every call because the
+/// user can change it while the agent runs.
+///
+/// The OS applies it to wheel events from a device, but not to the events
+/// [`post_scroll`] and [`post_smooth_scroll`] synthesise. A caller posting in
+/// place of a diverted wheel flips its own distance with this. `false` on
+/// Windows and Linux, which apply no such reversal to a mouse wheel's
+/// events here.
+#[must_use]
+pub fn natural_scrolling() -> bool {
+    cfg_select! {
+        target_os = "macos" => {
+            objc2::rc::autoreleasepool(|_| macos::natural_scrolling())
+        }
+        _ => {
+            false
+        }
+    }
 }
 
 /// Synthesise a typed scroll distance at the current focus.

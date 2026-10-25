@@ -10,8 +10,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HostConnection, LightCommand,
-    PasskeyMethod, PresenterPointerSpeed, PresenterSettings, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    PasskeyMethod, PointerSpeed, PresenterPointerSpeed, PresenterSettings, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -19,10 +19,11 @@ use openlogi_fixture::{
 };
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
-    ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, PresenterObservation, RingObservation,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
+    ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
+    LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, PresenterObservation,
+    RingObservation, SavedConfig,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -44,6 +45,7 @@ enum ReadFamily {
     FnLock,
     ReportRate,
     EasySwitch,
+    PointerSpeed,
 }
 
 #[derive(Clone)]
@@ -122,6 +124,10 @@ impl Agent for TestAgent {
         unreachable!("profile capture must use one snapshot")
     }
 
+    async fn observe_backlight(self, _: TarpcContext, _since: Generation) -> BacklightObservation {
+        unreachable!("profile capture must use one snapshot")
+    }
+
     async fn reload_config(self, _: TarpcContext) -> Result<(), ConfigReloadError> {
         unreachable!("profile capture is read-only")
     }
@@ -188,6 +194,26 @@ impl Agent for TestAgent {
         _rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
         unreachable!("profile capture must never write the report rate")
+    }
+    async fn read_pointer_speed(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        self.read(
+            ReadFamily::PointerSpeed,
+            &route,
+            |settings| &settings.pointer_speed,
+            0x2205,
+        )
+    }
+    async fn set_pointer_speed(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        unreachable!("profile capture must never write the pointer speed")
     }
     async fn set_backlight(
         self,
@@ -403,6 +429,21 @@ impl Agent for TestAgent {
     ) -> Result<EasySwitchHosts, WriteError> {
         unreachable!("profile capture must never rename a host")
     }
+    async fn reload_saved_config(
+        self,
+        _: TarpcContext,
+        _saved: SavedConfig,
+    ) -> Result<(), ConfigReloadError> {
+        unreachable!("profile capture is read-only")
+    }
+
+    async fn observe_notices(self, _: TarpcContext, _since: Generation) -> NoticeObservation {
+        unreachable!("profile capture must not inspect the overlay's notices")
+    }
+
+    async fn observe_lock_keys(self, _: TarpcContext, _since: Generation) -> LockKeyObservation {
+        unreachable!("profile capture must not inspect the lock-key indicator")
+    }
 }
 
 /// The client end of an in-process agent, past the handshake `connect_as`
@@ -473,6 +514,8 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             agent_version: "/private/Agent.app".to_string(),
             input_monitoring_granted: false,
             hid_open_failures: true,
+            secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),
@@ -487,6 +530,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        lights: Vec::new(),
     };
     TestAgent::from_profile(profile, snapshot)
 }
@@ -964,4 +1008,45 @@ async fn capture_replaces_every_easy_switch_computer_name() {
         .map(|slot| slot.name.as_deref())
         .collect();
     assert_eq!(names, [Some("Computer 1"), Some("Computer"), None]);
+}
+
+#[tokio::test]
+async fn receiver_capture_drops_a_sibling_device_with_no_identity() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let agent = fixture_agent_with(|profile| {
+        let keyboard = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 3)
+            .expect("synthetic RGB keyboard");
+        let model = keyboard.model_info.as_mut().expect("keyboard model info");
+        model.unit_id = [0; 4];
+        model.serial_number = None;
+    });
+
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+
+    let profile: DeviceProfile =
+        serde_json::from_slice(&std::fs::read(output).expect("profile output"))
+            .expect("typed profile");
+    profile.validate().expect("published profile validates");
+    assert_eq!(
+        profile.inventories[0].paired.len(),
+        1,
+        "the identity-less sibling has no principal and no settings route to bind \
+         to, so it is dropped from the capture entirely rather than left as a \
+         profile the generator can record but never verify (#1666)"
+    );
+    assert_eq!(profile.inventories[0].paired[0].slot, 1);
+    assert_eq!(profile.settings.len(), 1);
+    assert!(matches!(
+        profile.settings[0].route,
+        DeviceRoute::Bolt { slot: 1, .. }
+    ));
 }

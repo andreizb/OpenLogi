@@ -205,6 +205,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             watch::channel(Arc::new(crate::capture_plan::CapturePublication::default()));
         let mut actions = crate::runtime::ActionRuntime::new(
             Arc::default(),
+            Arc::default(),
             device_access.clone(),
             ring,
             capture_plans,

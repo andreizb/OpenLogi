@@ -18,6 +18,7 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 mod backlight;
 mod diagnostics;
 mod dpi;
+mod dpi_led;
 mod easy_switch;
 mod error;
 mod fn_lock;
@@ -38,16 +39,21 @@ pub use diagnostics::{
     dump_reprog_controls_on, read_battery_raw, read_battery_raw_on,
 };
 pub use dpi::{
-    Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, get_dpi_on, set_dpi,
-    set_dpi_on,
+    Dpi, DpiCapabilities, DpiInfo, DpiTarget, get_dpi, get_dpi_info, get_dpi_info_on, get_dpi_on,
+    set_dpi, set_dpi_on, set_dpi_target_on,
 };
+pub use dpi_led::{DpiLed, set_dpi_led_on};
+pub(crate) use easy_switch::read_name as read_host_friendly_name;
 pub use easy_switch::{
     get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
     rename_easy_switch_host_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
-pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on, play_presenter_haptic_on};
+pub use haptic::{
+    HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
+    play_presenter_haptic_on, restore_haptics_on,
+};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hidpp::feature::multi_platform::OsMask;
 pub use hires_wheel::{
@@ -61,16 +67,20 @@ pub use lighting::{
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{
-    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
-    apply as apply_litra, encode_command as encode_litra_command, find_litra,
-    litra_model_for_route, matches_litra,
+    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls,
+    LightWatch, LitraDescriptor, LitraModel, apply as apply_litra,
+    encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
+    read_state as read_litra_state, watch as watch_litra,
 };
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
-pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
+pub use openlogi_core::hid::{PointerSpeed, ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
-pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
+pub use pointer_scaling::{
+    PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
+    set_pointer_speed_on,
+};
 pub use pointer_speed::{
     get_presenter_pointer_speed, get_presenter_pointer_speed_on, set_presenter_pointer_speed,
     set_presenter_pointer_speed_on,
@@ -80,7 +90,7 @@ pub use report_rate::{
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
 };
 
 // commands_for_light_settings operates purely on openlogi_core config/device

@@ -84,6 +84,15 @@ impl GestureOutputs {
             openlogi_inject::post_scroll(delta);
         }
     }
+
+    /// Post a diverted main wheel's scroll, eased by the scroll runtime.
+    fn post_main_wheel_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
+        if let Err(direct) = self.scroll.try_hidpp_wheel_scroll(session, delta) {
+            // As for `post_scroll`: the wheel no longer scrolls by itself.
+            // `direct` is already scaled by the wheel's sensitivity.
+            openlogi_inject::post_scroll(direct);
+        }
+    }
 }
 
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
@@ -206,13 +215,41 @@ fn wanted_sessions(
     capture_plans.borrow().plans().to_vec()
 }
 
+/// Whether two dispatch plans resolve every input to the same action, differing
+/// at most in the hovered window they were selected for.
+fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
+    let DispatchPlan {
+        config_key,
+        bindings,
+        gesture_bindings,
+        side_gesture_bindings,
+        presenter_settings,
+        thumbwheel_sensitivity,
+        invert_wheel,
+        pointer_target: _,
+    } = a;
+    *config_key == b.config_key
+        && *bindings == b.bindings
+        && *gesture_bindings == b.gesture_bindings
+        && *side_gesture_bindings == b.side_gesture_bindings
+        && *presenter_settings == b.presenter_settings
+        && *thumbwheel_sensitivity == b.thumbwheel_sensitivity
+        && *invert_wheel == b.invert_wheel
+}
+
 fn reconcile_session(
     session: &mut RunningSession,
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
+    // A swipe that switches desktops moves the pointer onto another window,
+    // republishing an otherwise identical plan. Keep the hold so the same
+    // press can chain further swipes (#1634).
+    let pointer_only = wanted.is_some_and(|(_, plan)| same_bindings(session.dispatch(), plan));
     if session.reconcile_with(wanted, stop_for_target_change) == ReconcileAction::DispatchChanged {
-        dispatcher.cancel_session(session.id());
+        if !pointer_only {
+            dispatcher.cancel_session(session.id());
+        }
         let config_key = session.dispatch().config_key.clone();
         session.rekey(&config_key);
     }
