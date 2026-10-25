@@ -51,7 +51,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     PairedDevice, StandaloneDevice,
 };
-use openlogi_core::hid::{PointerSpeed, PresenterSettings};
+use openlogi_core::hid::{PresenterPointerSpeed, PresenterSettings};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -860,21 +860,21 @@ impl Agent for MockAgent {
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
     }
 
-    async fn read_pointer_speed(
+    async fn read_presenter_pointer_speed(
         self,
         _: Context,
         _route: DeviceRoute,
-    ) -> Result<PointerSpeed, WriteError> {
+    ) -> Result<PresenterPointerSpeed, WriteError> {
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x2205,
         })
     }
 
-    async fn set_pointer_speed(
+    async fn set_presenter_pointer_speed(
         self,
         _: Context,
         _route: DeviceRoute,
-        _speed: PointerSpeed,
+        _speed: PresenterPointerSpeed,
     ) -> Result<(), WriteError> {
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x2205,

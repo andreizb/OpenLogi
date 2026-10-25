@@ -255,9 +255,9 @@ impl PresenterSettings {
 /// values out of the public API while retaining the compact `u8` TOML/IPC
 /// representation used by the rest of the HID settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct PointerSpeed(u8);
+pub struct PresenterPointerSpeed(u8);
 
-impl PointerSpeed {
+impl PresenterPointerSpeed {
     /// Number of supported user-facing levels.
     pub const COUNT: u8 = 10;
 
@@ -284,7 +284,7 @@ impl PointerSpeed {
     }
 }
 
-impl Default for PointerSpeed {
+impl Default for PresenterPointerSpeed {
     fn default() -> Self {
         Self::MAX
     }
@@ -292,12 +292,18 @@ impl Default for PointerSpeed {
 
 #[cfg(test)]
 mod tests {
-    use super::PointerSpeed;
+    use super::PresenterPointerSpeed;
 
     #[test]
     fn accepts_only_the_ten_firmware_levels() {
-        assert_eq!(PointerSpeed::new(0), Some(PointerSpeed::MIN));
-        assert_eq!(PointerSpeed::new(9), Some(PointerSpeed::MAX));
-        assert_eq!(PointerSpeed::new(10), None);
+        assert_eq!(
+            PresenterPointerSpeed::new(0),
+            Some(PresenterPointerSpeed::MIN)
+        );
+        assert_eq!(
+            PresenterPointerSpeed::new(9),
+            Some(PresenterPointerSpeed::MAX)
+        );
+        assert_eq!(PresenterPointerSpeed::new(10), None);
     }
 }

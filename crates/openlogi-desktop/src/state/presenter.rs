@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use gpui::{App, Context};
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::bindings::presenter_bindings_for;
-use openlogi_core::hid::{PointerSpeed, PresenterSettings};
+use openlogi_core::hid::{PresenterPointerSpeed, PresenterSettings};
 
 use super::devices::DeviceRecord;
-use super::{AppState, DeviceKey, Load, PointerSpeedLoad, StateEvent, StateEvents};
+use super::{AppState, DeviceKey, Load, PresenterPointerSpeedLoad, StateEvent, StateEvents};
 
 impl AppState {
     /// Effective presenter settings for the profile currently open in the UI.
@@ -88,7 +88,7 @@ impl AppState {
         self.for_current_device(StateEvent::PresenterChanged)
     }
 
-    pub(super) fn load_current_pointer_speed(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn load_current_presenter_pointer_speed(&mut self, cx: &mut Context<Self>) {
         let Some((key, route)) = self
             .current_record()
             .and_then(|record| Some((record.device_key(), record.route.clone()?)))
@@ -97,12 +97,12 @@ impl AppState {
         };
         self.pointer
             .reads
-            .ensure_pointer_speed(key, route, self.ipc_sender(), cx);
+            .ensure_presenter_pointer_speed(key, route, self.ipc_sender(), cx);
     }
 
     /// Current pointer-speed load state for the selected device.
     #[must_use]
-    pub(crate) fn pointer_speed_status(&self) -> PointerSpeedLoad {
+    pub(crate) fn pointer_speed_status(&self) -> PresenterPointerSpeedLoad {
         self.current_record().map_or(Load::Unknown, |record| {
             self.pointer
                 .reads
@@ -111,15 +111,18 @@ impl AppState {
     }
 
     /// Retry the selected presenter's pointer-speed read.
-    pub(crate) fn retry_pointer_speed_read(cx: &mut App, key: DeviceKey) {
+    pub(crate) fn retry_presenter_pointer_speed_read(cx: &mut App, key: DeviceKey) {
         Self::apply(cx, |state| {
-            state.pointer.reads.retry_pointer_speed(&key);
+            state.pointer.reads.retry_presenter_pointer_speed(&key);
             StateEvent::PresenterChanged(key).into()
         });
     }
 
     /// Commit a live pointer-speed level through the agent.
-    pub(crate) fn commit_pointer_speed(&mut self, speed: PointerSpeed) -> StateEvents {
+    pub(crate) fn commit_presenter_pointer_speed(
+        &mut self,
+        speed: PresenterPointerSpeed,
+    ) -> StateEvents {
         let Some((key, route)) = self.current_record().and_then(|record| {
             record
                 .route
@@ -128,8 +131,10 @@ impl AppState {
         }) else {
             return StateEvents::none();
         };
-        self.pointer.reads.set_pointer_speed_ready(&key, speed);
-        self.send_ipc(crate::services::ipc::SetPointerSpeed { route, speed });
+        self.pointer
+            .reads
+            .set_presenter_pointer_speed_ready(&key, speed);
+        self.send_ipc(crate::services::ipc::SetPresenterPointerSpeed { route, speed });
         StateEvent::PresenterChanged(key).into()
     }
 }

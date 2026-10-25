@@ -8,7 +8,7 @@ use std::time::Duration;
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DpiInfo, EasySwitchHosts, FnLockState,
-    PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
+    PresenterPointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -18,18 +18,18 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{
-    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadPointerSpeed,
+    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadPresenterPointerSpeed,
     ReadReportRate, ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, HostRenameRefusal,
-    Load, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad, StateEvent,
+    Load, PresenterPointerSpeedLoad, ReportRateLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
-const POINTER_SPEED: &str = "pointer-speed";
+const PRESENTER_POINTER_SPEED: &str = "presenter-pointer-speed";
 const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
 const BACKLIGHT: &str = "backlight";
@@ -67,7 +67,7 @@ pub(crate) struct DeviceReads {
     next_flight: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
-    pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
+    presenter_pointer_speed: BTreeMap<DeviceKey, DeviceRead<PresenterPointerSpeed>>,
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
     report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
@@ -231,7 +231,7 @@ impl DeviceReads {
     }
 
     /// Start the Spotlight pointer-speed query unless this route is already watched.
-    pub(crate) fn ensure_pointer_speed(
+    pub(crate) fn ensure_presenter_pointer_speed(
         &mut self,
         key: DeviceKey,
         route: DeviceRoute,
@@ -239,13 +239,13 @@ impl DeviceReads {
         cx: &mut Context<AppState>,
     ) {
         if self
-            .pointer_speed
+            .presenter_pointer_speed
             .get(&key)
             .is_some_and(|read| read.route == route)
         {
             return;
         }
-        self.remove_pointer_speed(&key);
+        self.remove_presenter_pointer_speed(&key);
         let Some((client, runtime)) = self.cache() else {
             return;
         };
@@ -257,7 +257,7 @@ impl DeviceReads {
                 let commands = commands.clone();
                 let route = fetch_route.clone();
                 read_ipc(
-                    move |reply| ReadPointerSpeed { route, reply }.into(),
+                    move |reply| ReadPresenterPointerSpeed { route, reply }.into(),
                     commands,
                 )
             },
@@ -265,7 +265,7 @@ impl DeviceReads {
         )
         .retry_if(|error| !pointer_speed_error_is_permanent(error));
         let handle = client.subscribe(
-            query_key(POINTER_SPEED, &key),
+            query_key(PRESENTER_POINTER_SPEED, &key),
             fetcher,
             QueryOptions::immutable(),
         );
@@ -276,12 +276,12 @@ impl DeviceReads {
             let load = project_load(query_state.read(cx), pointer_speed_error_is_permanent);
             if state
                 .device_reads_mut()
-                .update_pointer_speed(&observed_key, flight, load)
+                .update_presenter_pointer_speed(&observed_key, flight, load)
             {
                 cx.emit(StateEvent::PresenterChanged(observed_key.clone()));
             }
         });
-        self.pointer_speed.insert(
+        self.presenter_pointer_speed.insert(
             key,
             DeviceRead {
                 route,
@@ -990,8 +990,8 @@ impl DeviceReads {
     }
 
     #[must_use]
-    pub(crate) fn pointer_speed_status(&self, key: &DeviceKey) -> PointerSpeedLoad {
-        self.pointer_speed
+    pub(crate) fn pointer_speed_status(&self, key: &DeviceKey) -> PresenterPointerSpeedLoad {
+        self.presenter_pointer_speed
             .get(key)
             .map_or(Load::Unknown, |read| read.load.clone())
     }
@@ -1019,8 +1019,8 @@ impl DeviceReads {
     }
 
     /// Retry an exhausted Spotlight pointer-speed query.
-    pub(crate) fn retry_pointer_speed(&mut self, key: &DeviceKey) {
-        let Some(read) = self.pointer_speed.get_mut(key) else {
+    pub(crate) fn retry_presenter_pointer_speed(&mut self, key: &DeviceKey) {
+        let Some(read) = self.presenter_pointer_speed.get_mut(key) else {
             return;
         };
         if !matches!(read.load, Load::Ready(_)) {
@@ -1044,15 +1044,19 @@ impl DeviceReads {
     }
 
     /// Publish a pointer-speed write optimistically into swr and the view model.
-    pub(crate) fn set_pointer_speed_ready(&mut self, key: &DeviceKey, speed: PointerSpeed) {
+    pub(crate) fn set_presenter_pointer_speed_ready(
+        &mut self,
+        key: &DeviceKey,
+        speed: PresenterPointerSpeed,
+    ) {
         let value = Arc::new(speed);
         if let Some(client) = &self.client {
-            client.set::<_, Cached<PointerSpeed>, WriteError>(
-                query_key(POINTER_SPEED, key),
+            client.set::<_, Cached<PresenterPointerSpeed>, WriteError>(
+                query_key(PRESENTER_POINTER_SPEED, key),
                 Some(value.clone()),
             );
         }
-        if let Some(read) = self.pointer_speed.get_mut(key) {
+        if let Some(read) = self.presenter_pointer_speed.get_mut(key) {
             read.load = Load::Ready(value);
         }
     }
@@ -1061,7 +1065,7 @@ impl DeviceReads {
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
         self.remove_smartshift(key);
-        self.remove_pointer_speed(key);
+        self.remove_presenter_pointer_speed(key);
         self.remove_fn_lock(key);
         self.remove_report_rate(key);
         self.remove_backlight(key);
@@ -1082,10 +1086,10 @@ impl DeviceReads {
         }
     }
 
-    pub(crate) fn remove_pointer_speed(&mut self, key: &DeviceKey) {
-        if let Some(read) = self.pointer_speed.remove(key) {
+    pub(crate) fn remove_presenter_pointer_speed(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.presenter_pointer_speed.remove(key) {
             drop(read);
-            self.clear::<PointerSpeed>(POINTER_SPEED, key);
+            self.clear::<PresenterPointerSpeed>(PRESENTER_POINTER_SPEED, key);
         }
     }
 
@@ -1125,7 +1129,7 @@ impl DeviceReads {
             .dpi
             .keys()
             .chain(self.smartshift.keys())
-            .chain(self.pointer_speed.keys())
+            .chain(self.presenter_pointer_speed.keys())
             .chain(self.fn_lock.keys())
             .chain(self.report_rate.keys())
             .chain(self.backlight.keys())
@@ -1263,14 +1267,14 @@ impl DeviceReads {
         true
     }
 
-    fn update_pointer_speed(
+    fn update_presenter_pointer_speed(
         &mut self,
         key: &DeviceKey,
         flight: u64,
-        load: PointerSpeedLoad,
+        load: PresenterPointerSpeedLoad,
     ) -> bool {
         let Some(read) = self
-            .pointer_speed
+            .presenter_pointer_speed
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {

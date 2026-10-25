@@ -31,7 +31,7 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, PointerSpeedLoad, ReportRateLoad,
+    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, PresenterPointerSpeedLoad, ReportRateLoad,
     SmartShiftLoad,
 };
 
@@ -226,7 +226,7 @@ impl AppState {
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
-            state.load_current_pointer_speed(cx);
+            state.load_current_presenter_pointer_speed(cx);
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
             state.load_current_backlight(cx);

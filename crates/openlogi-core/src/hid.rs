@@ -30,7 +30,9 @@ pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
-pub use presenter::{PointerSpeed, PresenterEffect, PresenterSettings, PresenterTimerMode};
+pub use presenter::{
+    PresenterEffect, PresenterPointerSpeed, PresenterSettings, PresenterTimerMode,
+};
 pub use report_rate::{ReportRate, ReportRateInfo};
 pub use route::{
     DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,

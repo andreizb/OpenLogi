@@ -18,7 +18,7 @@ use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
-use openlogi_core::hid::{PointerSpeed, PresenterSettings};
+use openlogi_core::hid::{PresenterPointerSpeed, PresenterSettings};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     HapticWaveform, HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo,
@@ -235,15 +235,15 @@ impl Agent for AgentServer {
             .await
     }
 
-    async fn read_pointer_speed(
+    async fn read_presenter_pointer_speed(
         self,
         _: Context,
         route: DeviceRoute,
-    ) -> Result<PointerSpeed, WriteError> {
+    ) -> Result<PresenterPointerSpeed, WriteError> {
         self.shared
             .device(&route)
-            .run(HidppOperation::ReadPointerSpeed, |channel| async move {
-                openlogi_hid::get_pointer_speed_on(&channel).await
+            .run(HidppOperation::ReadPresenterPointerSpeed, |channel| async move {
+                openlogi_hid::get_presenter_pointer_speed_on(&channel).await
             })
             .await
     }
@@ -261,17 +261,20 @@ impl Agent for AgentServer {
             .await
     }
 
-    async fn set_pointer_speed(
+    async fn set_presenter_pointer_speed(
         self,
         _: Context,
         route: DeviceRoute,
-        speed: PointerSpeed,
+        speed: PresenterPointerSpeed,
     ) -> Result<(), WriteError> {
         self.shared
             .device(&route)
-            .run(HidppOperation::WritePointerSpeed, |channel| async move {
-                openlogi_hid::set_pointer_speed_on(&channel, speed).await
-            })
+            .run(
+                HidppOperation::WritePresenterPointerSpeed,
+                |channel| async move {
+                    openlogi_hid::set_presenter_pointer_speed_on(&channel, speed).await
+                },
+            )
             .await
     }
 

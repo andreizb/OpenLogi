@@ -19,8 +19,9 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, PointerSpeed, PresenterEffect, PresenterSettings,
-    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, PairingError, PasskeyMethod, PresenterEffect, PresenterPointerSpeed,
+    PresenterSettings, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -656,9 +657,14 @@ pub trait Agent {
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
     /// Read the ten-level hardware pointer speed exposed by Spotlight.
-    async fn read_pointer_speed(route: DeviceRoute) -> Result<PointerSpeed, WriteError>;
+    async fn read_presenter_pointer_speed(
+        route: DeviceRoute,
+    ) -> Result<PresenterPointerSpeed, WriteError>;
     /// Write Spotlight's ten-level hardware pointer speed.
-    async fn set_pointer_speed(route: DeviceRoute, speed: PointerSpeed) -> Result<(), WriteError>;
+    async fn set_presenter_pointer_speed(
+        route: DeviceRoute,
+        speed: PresenterPointerSpeed,
+    ) -> Result<(), WriteError>;
     /// Block until the host-rendered Spotlight overlay changes.
     async fn observe_presenter(since: Generation) -> PresenterObservation;
     /// Apply host-side Spotlight settings to the active presenter.

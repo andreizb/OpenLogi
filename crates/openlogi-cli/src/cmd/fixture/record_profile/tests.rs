@@ -10,8 +10,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HostConnection, LightCommand,
-    PasskeyMethod, PointerSpeed, PresenterSettings, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus,
+    PasskeyMethod, PresenterPointerSpeed, PresenterSettings, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -338,19 +338,19 @@ impl Agent for TestAgent {
         )
     }
 
-    async fn read_pointer_speed(
+    async fn read_presenter_pointer_speed(
         self,
         _: TarpcContext,
         _route: DeviceRoute,
-    ) -> Result<PointerSpeed, WriteError> {
+    ) -> Result<PresenterPointerSpeed, WriteError> {
         unreachable!("profile capture does not read presenter pointer speed")
     }
 
-    async fn set_pointer_speed(
+    async fn set_presenter_pointer_speed(
         self,
         _: TarpcContext,
         _route: DeviceRoute,
-        _speed: PointerSpeed,
+        _speed: PresenterPointerSpeed,
     ) -> Result<(), WriteError> {
         unreachable!("profile capture must never write pointer speed")
     }

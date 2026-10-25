@@ -65,9 +65,10 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
-    ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
+    ReadPresenterPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
     RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
-    SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    SetLighting, SetPresenterPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
+    UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry

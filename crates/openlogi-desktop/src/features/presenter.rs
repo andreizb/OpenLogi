@@ -24,7 +24,9 @@ use gpui_component::{
 };
 use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::color::Rgb;
-use openlogi_core::hid::{PointerSpeed, PresenterEffect, PresenterSettings, PresenterTimerMode};
+use openlogi_core::hid::{
+    PresenterEffect, PresenterPointerSpeed, PresenterSettings, PresenterTimerMode,
+};
 
 use crate::features::binding_editor::presenter_action_picker;
 use crate::state::{AppState, DeviceKey, DeviceRecord, Load};
@@ -117,7 +119,7 @@ impl PresenterControlsView {
     fn ensure_speed_slider(
         &mut self,
         key: &DeviceKey,
-        speed: PointerSpeed,
+        speed: PresenterPointerSpeed,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -128,14 +130,17 @@ impl PresenterControlsView {
             return;
         }
         self.speed_slider = Some(CommitSlider::new(
-            SliderRange::new(PointerSpeed::MIN.get(), PointerSpeed::MAX.get()),
+            SliderRange::new(
+                PresenterPointerSpeed::MIN.get(),
+                PresenterPointerSpeed::MAX.get(),
+            ),
             speed.get(),
             cx,
             |_panel, level, cx| {
                 // The range is built from the two valid bounds, so every
-                // level the thumb can rest on is one `PointerSpeed` accepts.
-                if let Some(speed) = PointerSpeed::new(level) {
-                    AppState::apply(cx, |state| state.commit_pointer_speed(speed));
+                // level the thumb can rest on is one `PresenterPointerSpeed` accepts.
+                if let Some(speed) = PresenterPointerSpeed::new(level) {
+                    AppState::apply(cx, |state| state.commit_presenter_pointer_speed(speed));
                 }
             },
         ));
@@ -1175,12 +1180,12 @@ fn vibration_inspector(
 
 fn speed_control(
     slider: Option<&Entity<SliderState>>,
-    speed: PointerSpeed,
+    speed: PresenterPointerSpeed,
     pal: Palette,
 ) -> impl IntoElement {
     setting_slider(
         "Pointer speed",
-        format!("{} / {}", speed.get() + 1, PointerSpeed::COUNT),
+        format!("{} / {}", speed.get() + 1, PresenterPointerSpeed::COUNT),
         slider,
         pal,
     )
@@ -1209,7 +1214,7 @@ fn pointer_speed_failure(
                 .outline()
                 .label("Retry")
                 .on_click(move |_, _, cx| {
-                    AppState::retry_pointer_speed_read(cx, key.clone());
+                    AppState::retry_presenter_pointer_speed_read(cx, key.clone());
                     view.update(cx, |_, cx| cx.notify());
                 }),
         )

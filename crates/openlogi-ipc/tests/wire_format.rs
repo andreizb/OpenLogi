@@ -45,8 +45,8 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
     DeviceRoute, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
     HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
-    PasskeyMethod, PointerSpeed, PresenterEffect, PresenterSettings, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    PasskeyMethod, PresenterEffect, PresenterPointerSpeed, PresenterSettings, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
     SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
@@ -224,13 +224,13 @@ fn assert_presenter_request_variant_order() {
         product_id: 0xb503,
     };
     assert_wire(
-        &AgentRequest::ReadPointerSpeed { route: route() },
+        &AgentRequest::ReadPresenterPointerSpeed { route: route() },
         "1f02fb6d04fb03b5",
     );
     assert_wire(
-        &AgentRequest::SetPointerSpeed {
+        &AgentRequest::SetPresenterPointerSpeed {
             route: route(),
-            speed: PointerSpeed::new(4).expect("valid pointer speed"),
+            speed: PresenterPointerSpeed::new(4).expect("valid pointer speed"),
         },
         "2002fb6d04fb03b504",
     );
@@ -404,12 +404,15 @@ fn action_ring_types() {
     assert_wire(&HidppOperation::ReadFnLock, "0f");
     assert_wire(&HidppOperation::ReadPointerScaling, "10");
     assert_wire(&HidppOperation::WritePointerScaling, "11");
-    assert_wire(&HidppOperation::ReadPointerSpeed, "12");
-    assert_wire(&HidppOperation::WritePointerSpeed, "13");
+    assert_wire(&HidppOperation::ReadPresenterPointerSpeed, "12");
+    assert_wire(&HidppOperation::WritePresenterPointerSpeed, "13");
     assert_wire(&HidppOperation::WriteOsLayout, "14");
     assert_wire(&HidppOperation::ReadReportRate, "15");
     assert_wire(&HidppOperation::WriteReportRate, "16");
-    assert_wire(&PointerSpeed::new(4).expect("valid pointer speed"), "04");
+    assert_wire(
+        &PresenterPointerSpeed::new(4).expect("valid pointer speed"),
+        "04",
+    );
 }
 
 #[test]

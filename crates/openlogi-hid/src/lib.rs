@@ -33,9 +33,9 @@ pub use hidpp::feature::device_information::DeviceEntityType;
 pub use host::{
     apply_litra, channel_pool, dump_features, dump_firmware_entities, dump_reprog_controls,
     enumerate, enumerate_standalone, enumerator, get_backlight, get_dpi, get_dpi_info,
-    get_pointer_scaling, get_pointer_speed, get_scroll_wheel_mode, get_smartshift_status,
+    get_pointer_scaling, get_presenter_pointer_speed, get_scroll_wheel_mode, get_smartshift_status,
     list_pairing_receivers, play_haptic, read_battery_raw, set_dpi, set_fn_lock,
-    set_keyboard_color, set_keyboard_color_with, set_pointer_scaling, set_pointer_speed,
+    set_keyboard_color, set_keyboard_color_with, set_pointer_scaling, set_presenter_pointer_speed,
     set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_smartshift,
     set_smartshift_sensitivity, toggle_smartshift, update_backlight, watch_hotplug,
 };

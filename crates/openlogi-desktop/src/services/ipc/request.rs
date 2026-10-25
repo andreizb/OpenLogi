@@ -19,8 +19,8 @@ use std::future::Future;
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus,
-    WriteError,
+    LightCommand, PresenterPointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -473,17 +473,17 @@ impl Request for ReadFnLock {
 }
 
 /// Apply a Spotlight pointer speed now.
-pub struct SetPointerSpeed {
+pub struct SetPresenterPointerSpeed {
     pub route: DeviceRoute,
-    pub speed: PointerSpeed,
+    pub speed: PresenterPointerSpeed,
 }
 
-impl Request for SetPointerSpeed {
+impl Request for SetPresenterPointerSpeed {
     type Answer = Result<(), WriteError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
-            .set_pointer_speed(context::current(), self.route.clone(), self.speed)
+            .set_presenter_pointer_speed(context::current(), self.route.clone(), self.speed)
             .await
     }
 
@@ -493,17 +493,17 @@ impl Request for SetPointerSpeed {
 }
 
 /// Read a device's Spotlight pointer speed; the answer goes back over `reply`.
-pub struct ReadPointerSpeed {
+pub struct ReadPresenterPointerSpeed {
     pub route: DeviceRoute,
-    pub reply: oneshot::Sender<Result<PointerSpeed, WriteError>>,
+    pub reply: oneshot::Sender<Result<PresenterPointerSpeed, WriteError>>,
 }
 
-impl Request for ReadPointerSpeed {
-    type Answer = Result<PointerSpeed, WriteError>;
+impl Request for ReadPresenterPointerSpeed {
+    type Answer = Result<PresenterPointerSpeed, WriteError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
-            .read_pointer_speed(context::current(), self.route.clone())
+            .read_presenter_pointer_speed(context::current(), self.route.clone())
             .await
     }
 
@@ -728,8 +728,8 @@ commands! {
     RenameEasySwitchHost,
     ReadDpi,
     ReadSmartShift,
-    SetPointerSpeed,
-    ReadPointerSpeed,
+    SetPresenterPointerSpeed,
+    ReadPresenterPointerSpeed,
     ReadFnLock,
     ReadReportRate,
     ReadBacklight,

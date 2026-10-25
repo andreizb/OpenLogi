@@ -72,7 +72,8 @@ pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
 pub use pointer_speed::{
-    get_pointer_speed, get_pointer_speed_on, set_pointer_speed, set_pointer_speed_on,
+    get_presenter_pointer_speed, get_presenter_pointer_speed_on, set_presenter_pointer_speed,
+    set_presenter_pointer_speed_on,
 };
 pub use report_rate::{
     get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,

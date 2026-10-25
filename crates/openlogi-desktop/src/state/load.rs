@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use openlogi_core::hid::{
-    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, PointerSpeed, ReportRateInfo,
+    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, PresenterPointerSpeed, ReportRateInfo,
     SmartShiftStatus,
 };
 
@@ -38,7 +38,7 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 
 /// Per-device Spotlight pointer-speed (`0x2205`) load state. The value lives
 /// on the presenter and is therefore queried instead of persisted in TOML.
-pub type PointerSpeedLoad = Load<Arc<PointerSpeed>>;
+pub type PresenterPointerSpeedLoad = Load<Arc<PresenterPointerSpeed>>;
 
 /// Per-keyboard Fn-lock (`0x40a2` / `0x40a3`) load state. See [`Load`]. The
 /// read shows what the keyboard holds right now — it can differ from the

@@ -12,7 +12,9 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{FnLockState, LightCommand, PairingError, PointerSpeed, WriteError};
+use openlogi_core::hid::{
+    FnLockState, LightCommand, PairingError, PresenterPointerSpeed, WriteError,
+};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -67,13 +69,18 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
 }
 
 /// Read Spotlight's current pointer-speed level.
-pub async fn get_pointer_speed(route: &DeviceRoute) -> Result<PointerSpeed, WriteError> {
-    device::get_pointer_speed(&*native_backend(), route).await
+pub async fn get_presenter_pointer_speed(
+    route: &DeviceRoute,
+) -> Result<PresenterPointerSpeed, WriteError> {
+    device::get_presenter_pointer_speed(&*native_backend(), route).await
 }
 
 /// Set Spotlight's pointer-speed level.
-pub async fn set_pointer_speed(route: &DeviceRoute, speed: PointerSpeed) -> Result<(), WriteError> {
-    device::set_pointer_speed(&*native_backend(), route, speed).await
+pub async fn set_presenter_pointer_speed(
+    route: &DeviceRoute,
+    speed: PresenterPointerSpeed,
+) -> Result<(), WriteError> {
+    device::set_presenter_pointer_speed(&*native_backend(), route, speed).await
 }
 
 /// Read the pointer-motion scaling of the device `route` reaches.

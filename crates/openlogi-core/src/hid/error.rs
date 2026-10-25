@@ -255,9 +255,9 @@ pub enum HidppOperation {
     /// is wire format.
     WritePointerScaling,
     /// Read the current Spotlight pointer-speed level.
-    ReadPointerSpeed,
+    ReadPresenterPointerSpeed,
     /// Write the Spotlight pointer-speed level.
-    WritePointerSpeed,
+    WritePresenterPointerSpeed,
     /// Keep a keyboard's `0x4531` platform on the host OS: read the platform
     /// table and the current host's platform, and write it when it differs.
     /// Appended last — variant order is wire format.
