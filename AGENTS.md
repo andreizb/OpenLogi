@@ -178,6 +178,15 @@ loaded for any Rust or `Cargo.toml` edit.
 - Never post to external repos or reply publicly on the maintainer's behalf — draft the
   text for approval. Keep public drafts short, casual, and problem-focused.
 
+## Spotlight fork update gate
+
+Before updating `feat/spotlight-presenter`, check upstream's latest release,
+current source, and [Spotlight issue #279](https://github.com/AprilNEA/OpenLogi/issues/279).
+If functional Spotlight support has been merged or shipped upstream, stop before
+merging, installing, or replacing this fork and tell the user what upstream added.
+Generic presenter/receiver recognition and unmerged contributor work alone do not
+satisfy this condition. The user requested this stop-and-notify policy on 2026-10-31.
+
 ## Releases
 
 release-plz drives releases: one unified workspace version, ONE root `CHANGELOG.md`
