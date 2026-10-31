@@ -32,7 +32,7 @@ mod wheel_hold;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+pub use device::{DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides};
 #[cfg(all(test, feature = "fs", unix))]
 use file::resolve_symlinks;
 #[cfg(feature = "fs")]
@@ -58,6 +58,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v10 adds per-device [`DeviceConfig::disabled_keys`]. Older files omit the
+/// setting and leave the firmware unmanaged. The bump makes a v9 build reject
+/// a file that stores the field at the version check instead of failing after
+/// parsing an unknown field.
 ///
 /// v9 adds the `[apps]` alias table and `app:<alias>` per-app profile keys
 /// (see [`Config::apps`]). Nothing older needs migrating; the bump makes a v8
@@ -112,11 +117,9 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-/// v7 adds Spotlight presenter actions and the first visual controls. Preview
-/// builds extended that schema through v8 with the timer, per-effect controls,
-/// and per-app presenter settings. v9 reconciles those preview files with the
-/// transport-independent device keys introduced by upstream v5.
-pub const SCHEMA_VERSION: u32 = 9;
+/// Spotlight preview builds also used schemas 7–9 for local presenter settings;
+/// these remain supported alongside the upstream fields described above.
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]

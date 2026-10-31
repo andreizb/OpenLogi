@@ -3,6 +3,51 @@
 use super::*;
 
 #[test]
+fn spotlight_v9_settings_survive_migration_with_a_recovery_copy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let key = "unit:01020304";
+    let mut previous = Config {
+        schema_version: 9,
+        ..Config::default()
+    };
+    previous.set_presenter(
+        key,
+        crate::hid::PresenterSettings {
+            effect: crate::hid::PresenterEffect::Magnify,
+            magnification: 275,
+            ..crate::hid::PresenterSettings::default()
+        },
+    );
+    previous.set_per_app_presenter(
+        key,
+        "com.example.slides",
+        Some(crate::hid::PresenterSettings {
+            effect: crate::hid::PresenterEffect::DigitalLaser,
+            ..crate::hid::PresenterSettings::default()
+        }),
+    );
+    previous.set_binding(
+        key,
+        ButtonId::PresenterNextHold,
+        Binding::Single(Action::PresenterStartPresentation),
+    );
+    let original = toml::to_string_pretty(&previous).expect("serialize old config");
+    fs::write(&path, &original).expect("write v9 config");
+
+    let (migrated, mut tracked) = ConfigFile::load_from_path(&path).expect("load v9 config");
+    assert_eq!(migrated.schema_version, SCHEMA_VERSION);
+    assert_eq!(migrated.devices, previous.devices);
+    tracked.save(&migrated).expect("save migrated config");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("config.toml.v9.bak")).expect("read v9 recovery copy"),
+        original
+    );
+    let reloaded = Config::load_from_path(&path).expect("reload migrated config");
+    assert_eq!(reloaded.devices, previous.devices);
+}
+
+#[test]
 fn canonical_configuration_example_parses() {
     let body = include_str!("../../../../../docs/config.example.toml");
     let config: Config = toml::from_str(body).expect("documented config must parse");

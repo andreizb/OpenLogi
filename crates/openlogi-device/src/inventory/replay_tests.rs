@@ -321,6 +321,10 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
             .channel_completion(BOLT_CHANNEL)
             .expect("known channel")
     );
+    assert!(
+        !enumerator.replaced_channels_last_tick(),
+        "a first open replaces nothing"
+    );
     let stale = registry.lookup(&route).expect("receiver route published");
 
     backend
@@ -331,6 +335,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     assert!(enumerator.ledger.contains_last_good(&node_id));
     assert!(!stale.channel().is_connected());
     assert!(registry.is_current(&stale));
+    assert!(!enumerator.replaced_channels_last_tick());
 
     let second_failure = enumerator
         .enumerate()
@@ -340,6 +345,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     assert!(enumerator.channels.is_retiring(&node_id));
     assert!(!registry.is_current(&stale));
     assert!(registry.lookup(&route).is_none());
+    assert!(!enumerator.replaced_channels_last_tick());
     drop(stale);
 
     backend
@@ -350,11 +356,16 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
         .await
         .expect("quiescent retirement is deferred for one pass");
     assert_eq!(draining, std::slice::from_ref(&expected));
+    assert!(!enumerator.replaced_channels_last_tick());
     let repaired = enumerator
         .enumerate()
         .await
         .expect("replacement probe succeeds");
 
+    assert!(
+        enumerator.replaced_channels_last_tick(),
+        "the pass that reopens a retired channel must report the replacement"
+    );
     assert_eq!(repaired, [expected]);
     let replacement = registry.lookup(&route).expect("replacement published");
     assert!(replacement.channel().is_connected());
@@ -372,6 +383,97 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
         "the disconnected lifetime must be retired before replacement"
     );
     completion
+        .require_complete()
+        .expect("both successful probe cassettes consumed");
+}
+
+/// A node the OS keeps listing but that stops answering — a wedged receiver,
+/// or a powered-off Bluetooth mouse whose node lingers — keeps being retired
+/// and reopened. Its replay grace runs out on the first reopen, so the agent
+/// sees it go offline: no reopen after that is an unobserved reconnect, and
+/// reporting one would re-apply every online device's settings and re-arm
+/// every capture on each cycle.
+#[tokio::test]
+async fn reopening_a_channel_the_agent_saw_go_offline_reports_no_replacement() {
+    let fixture = bolt_fixture(
+        "persistently-dead-channel",
+        &[BoltSlot {
+            slot: 1,
+            online: true,
+        }],
+        2,
+    );
+    let expected = fixture.inventory.clone();
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid Bolt replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let initial = enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    assert_eq!(initial, std::slice::from_ref(&expected));
+
+    // Two retire/reopen cycles on a dead channel: the first reopen exhausts
+    // the replay grace, the second finds the node already surfaced offline.
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Disconnected)
+        .expect("known channel");
+    for _ in 0..16 {
+        if backend.open_count(&node_id).expect("known node") == 3 {
+            break;
+        }
+        enumerator
+            .enumerate()
+            .await
+            .expect("a dead channel still enumerates");
+        assert!(
+            !enumerator.replaced_channels_last_tick(),
+            "a reopen past the replay grace is not an unobserved reconnect"
+        );
+    }
+    assert_eq!(
+        backend.open_count(&node_id).expect("known node"),
+        3,
+        "the dead channel must have been reopened twice"
+    );
+    assert!(!enumerator.ledger.contains_last_good(&node_id));
+
+    // The receiver answers again on the next reopen. The agent saw it go
+    // offline, so its offline→online transition re-applies the settings.
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Connected)
+        .expect("known channel");
+    let mut recovered = Vec::new();
+    for _ in 0..16 {
+        if backend.open_count(&node_id).expect("known node") == 4 {
+            break;
+        }
+        recovered = enumerator
+            .enumerate()
+            .await
+            .expect("the reopened channel enumerates");
+        assert!(
+            !enumerator.replaced_channels_last_tick(),
+            "a node already surfaced offline comes back as a transition"
+        );
+    }
+    assert_eq!(backend.open_count(&node_id).expect("known node"), 4);
+    assert_eq!(recovered, [expected]);
+    assert!(enumerator.ledger.contains_last_good(&node_id));
+    backend
+        .channel_completion(BOLT_CHANNEL)
+        .expect("known channel")
         .require_complete()
         .expect("both successful probe cassettes consumed");
 }
@@ -462,6 +564,129 @@ async fn disconnected_direct_channel_replays_last_good_then_opens_a_replacement(
         .expect("known channel")
         .require_complete()
         .expect("the initial probe cassette is consumed");
+}
+
+/// Capture's liveness ping can find a direct channel dead while inventory
+/// still publishes it and would need two failed probes, each up to its whole
+/// timeout, to notice (#2020). A report retires it on the very next pass.
+#[tokio::test]
+async fn a_direct_channel_capture_reports_dead_retires_on_the_next_pass() {
+    let fixture = direct_fixture(OpenOutcome::Hidpp, 1);
+    let expected = fixture.inventory.clone();
+    let route = crate::DeviceRoute::Direct {
+        vendor_id: expected.receiver.vendor_id,
+        product_id: expected.receiver.product_id,
+    };
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid direct replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    let initial = enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    assert_eq!(initial, std::slice::from_ref(&expected));
+    let stale = registry.lookup(&route).expect("direct route published");
+
+    assert!(registry.report_dead(&stale));
+    tokio::time::timeout(Duration::from_secs(1), enumerator.dead_channel_reported())
+        .await
+        .expect("a report wakes the inventory watcher");
+    let reported = enumerator
+        .enumerate()
+        .await
+        .expect("the reporting pass replays");
+    assert_eq!(
+        reported,
+        std::slice::from_ref(&expected),
+        "the device stays listed while its channel drains"
+    );
+    assert!(
+        enumerator.channels.is_retiring(&node_id),
+        "one pass retires a reported channel"
+    );
+    assert!(!registry.is_current(&stale));
+    assert!(registry.lookup(&route).is_none());
+    assert!(!registry.report_dead(&stale));
+    assert!(
+        registry.take_dead_reports().is_empty(),
+        "a channel inventory already withdrew is not reported again"
+    );
+    drop(stale);
+
+    let draining = enumerator
+        .enumerate()
+        .await
+        .expect("quiescent retirement is deferred for one pass");
+    assert_eq!(draining, std::slice::from_ref(&expected));
+    let repaired = enumerator
+        .enumerate()
+        .await
+        .expect("replacement probe succeeds");
+
+    assert!(
+        enumerator.replaced_channels_last_tick(),
+        "the reopen must report the replacement so settings and captures re-apply"
+    );
+    assert_eq!(repaired, [expected]);
+    let replacement = registry.lookup(&route).expect("replacement published");
+    assert!(registry.is_current(&replacement));
+    assert_eq!(backend.open_count(&node_id).expect("known node"), 2);
+    backend
+        .channel_completion(DIRECT_CHANNEL)
+        .expect("known channel")
+        .require_complete()
+        .expect("the initial probe cassette is consumed");
+}
+
+/// A receiver's channel carries every paired slot, so a silent device behind
+/// it must not take the channel down for the others.
+#[tokio::test]
+async fn a_receiver_slot_capture_report_leaves_the_receiver_channel_published() {
+    let fixture = bolt_fixture(
+        "dead-report-receiver",
+        &[BoltSlot {
+            slot: 1,
+            online: true,
+        }],
+        1,
+    );
+    let route = crate::DeviceRoute::Bolt {
+        receiver_uid: BOLT_UID.to_string(),
+        slot: 1,
+    };
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid Bolt replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    let slot = registry.lookup(&route).expect("receiver route published");
+
+    assert!(!registry.report_dead(&slot));
+
+    assert!(registry.take_dead_reports().is_empty());
+    assert!(registry.is_current(&slot));
 }
 
 #[tokio::test]

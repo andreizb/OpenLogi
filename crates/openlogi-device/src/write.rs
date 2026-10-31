@@ -10,18 +10,24 @@
 
 use std::sync::Arc;
 
-use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
+use hidpp::{
+    channel::HidppChannel,
+    device::Device,
+    feature::{CreatableFeature, disable_keys::DisableKeysFeature},
+};
 
 use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
 
 mod backlight;
 mod diagnostics;
+mod disable_keys;
 mod dpi;
 mod dpi_led;
 mod easy_switch;
 mod error;
 mod fn_lock;
+mod force_sensing;
 mod haptic;
 mod hires_wheel;
 mod lighting;
@@ -34,9 +40,13 @@ mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use diagnostics::{
-    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
-    dump_features_on, dump_firmware_entities, dump_firmware_entities_on, dump_reprog_controls,
-    dump_reprog_controls_on, read_battery_raw, read_battery_raw_on,
+    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, RAW_BATTERY_FEATURES, ReprogControlEntry,
+    dump_features, dump_features_on, dump_firmware_entities, dump_firmware_entities_on,
+    dump_reprog_controls, dump_reprog_controls_on, read_battery_raw, read_battery_raw_on,
+};
+pub use disable_keys::{
+    get_disable_keys, get_disable_keys_on, set_disable_keys, set_disable_keys_on,
+    set_disable_keys_write_through_on,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, DpiTarget, get_dpi, get_dpi_info, get_dpi_info_on, get_dpi_on,
@@ -50,6 +60,7 @@ pub use easy_switch::{
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
+pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
     play_presenter_haptic_on, restore_haptics_on,
@@ -72,10 +83,11 @@ pub use litra::{
     encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
     read_state as read_litra_state, watch as watch_litra,
 };
+pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
-pub use openlogi_core::hid::{PointerSpeed, ReportRate, ReportRateInfo};
+pub use openlogi_core::hid::{ForceSensingInfo, PointerSpeed, ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{
     PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
@@ -99,6 +111,7 @@ pub use smartshift::{
 pub use openlogi_core::hid::light::commands_for_light_settings;
 
 pub(crate) use error::classify_hidpp_error;
+pub(crate) use force_sensing::{force_button_is_changeable, panel_button};
 
 /// Look up `F` on a device by HID++ feature ID, register it with
 /// [`Device::add_feature`], and return the typed wrapper.
@@ -125,9 +138,31 @@ pub(crate) async fn open_feature_with_version<F: CreatableFeature + 'static>(
         .root()
         .get_feature(F::ID)
         .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?
-        .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?;
+    register_feature::<F>(device, info)
+}
+
+/// Eligibility and wrapper registration have one owner for both I/O lifetimes.
+fn register_feature<F: CreatableFeature + 'static>(
+    device: &mut Device,
+    info: Option<hidpp::feature::root::FeatureInformation>,
+) -> Result<(Arc<F>, u8), WriteError> {
+    let info = info.ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
+    if F::ID == DisableKeysFeature::ID && !info.typ.is_end_user_configurable() {
+        return Err(WriteError::FeatureUnsupported { feature_hex: F::ID });
+    }
     Ok((device.add_feature::<F>(info.index), info.version))
+}
+
+async fn open_feature_write_through<F: CreatableFeature + 'static>(
+    device: &mut Device,
+) -> Result<Arc<F>, WriteError> {
+    let info = device
+        .root()
+        .get_feature_write_through(F::ID)
+        .await
+        .map_err(|error| classify_hidpp_error(error, HidppOperation::ResolveFeature, F::ID))?;
+    register_feature::<F>(device, info).map(|(feature, _)| feature)
 }
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once

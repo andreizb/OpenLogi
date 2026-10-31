@@ -15,16 +15,19 @@ use gpui_component::{
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection};
 
+use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
     default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, ShortcutMode, binding_inspector,
+    ActionPickerContext, BindingInspectorData, InvalidDrafts, ShortcutMode, binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
+use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder};
+use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
@@ -59,7 +62,6 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
 struct MouseWorkspaceData<'a> {
-    device_key: Option<DeviceKey>,
     asset: Option<&'a ResolvedAsset>,
     active: Option<MouseControlId>,
     bindings: &'a BTreeMap<ButtonId, Action>,
@@ -76,7 +78,6 @@ struct MouseWorkspaceData<'a> {
 impl<'a> MouseWorkspaceData<'a> {
     fn read(cx: &'a App) -> Option<Self> {
         AppState::try_read(cx).map(|state| Self {
-            device_key: state.current_record().map(DeviceRecord::device_key),
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
@@ -112,7 +113,6 @@ impl<'a> MouseWorkspaceData<'a> {
             BTreeMap::new();
         static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
         Self {
-            device_key: None,
             asset: None,
             active: None,
             bindings: &NO_BINDINGS,
@@ -140,11 +140,17 @@ pub struct MouseModelView {
     action_search: Entity<InputState>,
     pub(super) custom_shortcut_input: Entity<InputState>,
     pub(super) custom_application_input: Entity<InputState>,
-    /// Whether the last "Add" attempt on the corresponding custom editor
-    /// failed to parse, so its caption can show an inline error.
-    pub(super) custom_shortcut_invalid: bool,
+    pub(super) custom_command_input: Entity<InputState>,
+    /// Which custom editors' last "Add" attempt failed to parse, so their
+    /// captions can show an inline error.
+    pub(super) invalid_drafts: InvalidDrafts,
     pub(super) shortcut_mode: ShortcutMode,
-    pub(super) custom_application_invalid: bool,
+    /// The custom shortcut recording in progress, if any.
+    shortcut_recorder: Option<ShortcutRecorder>,
+    /// The Record button's area; a recording lasts while focus stays in it.
+    shortcut_record_focus: FocusHandle,
+    /// The press-force slider while the haptic panel's inspector shows it.
+    pub(super) force_sensing: Option<ForceSensingSlider>,
     _state_obs: Subscription,
 }
 
@@ -165,7 +171,7 @@ impl MouseModelView {
         });
         cx.subscribe(&custom_shortcut_input, |view, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                view.custom_shortcut_invalid = false;
+                view.invalid_drafts.shortcut = false;
                 cx.notify();
             }
         })
@@ -178,11 +184,22 @@ impl MouseModelView {
             &custom_application_input,
             |view, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    view.custom_application_invalid = false;
+                    view.invalid_drafts.application = false;
                     cx.notify();
                 }
             },
         )
+        .detach();
+        let custom_command_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(text_editor_placeholder(PowerUserKind::RunShellCommand))
+        });
+        cx.subscribe(&custom_command_input, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.invalid_drafts.command = false;
+                cx.notify();
+            }
+        })
         .detach();
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
@@ -190,6 +207,7 @@ impl MouseModelView {
                 StateEvent::ForegroundChanged
                     | StateEvent::BindingsChanged(_)
                     | StateEvent::LightingChanged(_)
+                    | StateEvent::ForceSensingChanged(_)
             )
         });
         Self {
@@ -202,16 +220,19 @@ impl MouseModelView {
             action_search,
             custom_shortcut_input,
             custom_application_input,
-            custom_shortcut_invalid: false,
+            custom_command_input,
+            invalid_drafts: InvalidDrafts::default(),
             shortcut_mode: ShortcutMode::Tap,
-            custom_application_invalid: false,
+            shortcut_recorder: None,
+            shortcut_record_focus: cx.focus_handle(),
+            force_sensing: None,
             _state_obs: state_obs,
         }
     }
 
-    /// Clear both custom-action drafts (text and any invalid state) — called
-    /// whenever the picker opens for a new target, so a shortcut or
-    /// application typed for one button doesn't reappear for another.
+    /// Clear every custom-action draft (text and any invalid state) — called
+    /// whenever the picker opens for a new target, so a shortcut, application
+    /// or command typed for one button doesn't reappear for another.
     pub(super) fn clear_custom_action_drafts(
         &mut self,
         window: &mut Window,
@@ -221,9 +242,11 @@ impl MouseModelView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.custom_application_input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.custom_shortcut_invalid = false;
-        self.custom_application_invalid = false;
+        self.custom_command_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.invalid_drafts = InvalidDrafts::default();
         self.shortcut_mode = ShortcutMode::Tap;
+        self.shortcut_recorder = None;
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -231,14 +254,47 @@ impl MouseModelView {
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
         self.action_picker_open = false;
+        self.shortcut_recorder = None;
     }
 
     pub(super) fn toggle_action_picker(&mut self) {
         self.action_picker_open = !self.action_picker_open;
+        self.shortcut_recorder = None;
     }
 
     pub(super) fn close_action_picker(&mut self) {
         self.action_picker_open = false;
+        self.shortcut_recorder = None;
+    }
+
+    /// Start recording the custom shortcut, or stop the recording in
+    /// progress.
+    pub(super) fn toggle_shortcut_recording(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shortcut_recorder.take().is_none() {
+            let area = self.shortcut_record_focus.clone();
+            self.shortcut_recorder = Some(ShortcutRecorder::start(&area, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// The action picker's state, as the inspector reads it.
+    fn action_picker_context<'a>(&'a self, view: &'a Entity<Self>) -> ActionPickerContext<'a> {
+        ActionPickerContext {
+            open: self.action_picker_open,
+            search: &self.action_search,
+            shortcut_input: &self.custom_shortcut_input,
+            application_input: &self.custom_application_input,
+            command_input: &self.custom_command_input,
+            shortcut_mode: self.shortcut_mode,
+            shortcut_recording: self.shortcut_recorder.is_some(),
+            shortcut_record_focus: &self.shortcut_record_focus,
+            invalid: self.invalid_drafts,
+            view,
+        }
     }
 
     fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
@@ -250,13 +306,15 @@ impl MouseModelView {
         self.selected = None;
         self.gesture_active_dir = None;
         self.action_picker_open = false;
+        self.shortcut_recorder = None;
     }
 
-    fn select(&mut self, control: MouseControlId) {
+    pub(super) fn select(&mut self, control: MouseControlId) {
         if self.selected != Some(control) {
             self.selected = Some(control);
             self.gesture_active_dir = None;
             self.action_picker_open = false;
+            self.shortcut_recorder = None;
         }
     }
 }
@@ -306,13 +364,55 @@ impl MouseModelView {
             cx,
         );
     }
+
+    /// Follow a device change, then keep the press-force slider in step with
+    /// the selection it may have cleared. Runs before `render` reads the
+    /// state for the frame, since the slider sync needs the context mutably.
+    fn sync_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ForceSensingFacts> {
+        self.reset_for_device(
+            AppState::try_read(cx)
+                .and_then(AppState::current_record)
+                .map(DeviceRecord::device_key),
+        );
+        let facts = ForceSensingFacts::current(self.selected, cx);
+        ForceSensingSlider::sync(&mut self.force_sensing, facts.as_ref(), window, cx);
+        facts
+    }
+}
+
+impl RecordsShortcut for MouseModelView {
+    /// A recorded chord fills the shortcut field, and Add commits it in the
+    /// chosen mode. A key a shortcut cannot send shows the field's error.
+    fn shortcut_recorded(
+        &mut self,
+        recording: Recording,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcut_recorder = None;
+        match recording {
+            Recording::Chord(combo) => {
+                self.custom_shortcut_input.update(cx, |input, cx| {
+                    input.set_value(combo.rendered_label(), window, cx);
+                });
+                self.invalid_drafts.shortcut = false;
+            }
+            Recording::Cancelled => {}
+            Recording::Unsupported => self.invalid_drafts.shortcut = true,
+        }
+        cx.notify();
+    }
 }
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.localize_action_picker_inputs(window, cx);
+        let force_sensing = self.sync_selection(window, cx);
         let MouseWorkspaceData {
-            device_key,
             asset,
             active,
             bindings,
@@ -325,8 +425,6 @@ impl Render for MouseModelView {
             editing_app,
             overridden,
         } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
-
-        self.reset_for_device(device_key);
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
             .keys()
@@ -402,17 +500,9 @@ impl Render for MouseModelView {
                 wheel_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
+                press_force: PressForce::of(force_sensing.as_ref(), self.force_sensing.as_ref()),
             },
-            ActionPickerContext {
-                open: self.action_picker_open,
-                search: &self.action_search,
-                shortcut_input: &self.custom_shortcut_input,
-                application_input: &self.custom_application_input,
-                shortcut_invalid: self.custom_shortcut_invalid,
-                shortcut_mode: self.shortcut_mode,
-                application_invalid: self.custom_application_invalid,
-                view: &view,
-            },
+            self.action_picker_context(&view),
             cx,
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)

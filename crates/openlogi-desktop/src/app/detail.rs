@@ -24,6 +24,7 @@ use crate::app::menu::open_config_folder;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -46,7 +47,9 @@ use crate::ui::theme::{
 mod backlight;
 mod easy_switch;
 
-const CAMERA_PREVIEW_W: Rems = rems(32.125);
+/// The preview plus the card's padding and its 1 px border. The border stays
+/// one pixel at every interface scale, so keep a little slack for it below 100 %.
+const CAMERA_PREVIEW_W: Rems = rems(32.25);
 const CAMERA_CONTROLS_W: Rems = rems(31.25);
 const LIGHT_CONTROLS_W: Rems = rems(25.);
 const LIGHT_CONTROLS_MIN_W: Rems = rems(22.5);
@@ -96,6 +99,7 @@ pub(super) struct DetailPanels<'a> {
     pub mouse_model: &'a gpui::Entity<MouseModelView>,
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
+    pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub presenter_panel: &'a gpui::Entity<PresenterControlsView>,
@@ -139,7 +143,7 @@ pub(super) fn detail_content(
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
-        DetailTab::Device => device_tab(cx).into_any_element(),
+        DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
     v_flex()
@@ -698,11 +702,18 @@ fn light_tab(
 }
 
 /// Device tab: device details and configuration cards stacked.
-fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
+fn device_tab(
+    disable_keys_panel: &gpui::Entity<DisableKeysPanel>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let pal = theme::palette(cx);
     let keyboard = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.kind == DeviceKind::Keyboard);
+    let show_disable_keys = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .and_then(|record| record.capabilities)
+        .is_some_and(|capabilities| capabilities.disable_keys);
     tab_body(
         ContentWidth::Small,
         v_flex()
@@ -718,7 +729,8 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
                 easy_switch::EasySwitchFacts::current(cx),
                 pal,
             ))
-            .child(configuration_card(pal, cx)),
+            .child(configuration_card(pal, cx))
+            .children(show_disable_keys.then(|| disable_keys_panel.clone())),
     )
 }
 
@@ -995,7 +1007,9 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
 
     DescriptionList::new()
         .columns(1)
-        .label_width(px(100.))
+        // Match the configuration card: a fixed 100 px cut "Geräteschlüssel"
+        // and longer translations into their values (#1856).
+        .label_width(rems(12.))
         .bordered(false)
         .children(items)
 }
@@ -1033,6 +1047,21 @@ mod tests {
     use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
     use crate::state::{AppState, Sources};
     use crate::ui::theme;
+
+    #[test]
+    fn camera_preview_fits_its_card_at_every_interface_scale() {
+        for scale in openlogi_core::config::UiScale::ALL {
+            let rem = theme::rem_size(scale);
+            let column = super::CAMERA_PREVIEW_W.to_pixels(rem);
+            let card = crate::features::camera::preview::PREVIEW_W.to_pixels(rem)
+                + theme::CARD_PAD.rems().to_pixels(rem) * 2.
+                + px(2.);
+            assert!(
+                card <= column,
+                "{scale:?}: card {card:?} > column {column:?}"
+            );
+        }
+    }
 
     /// Hosts the row at a card-like width so a long caption has to wrap.
     struct DeviceEnabledRowHost;

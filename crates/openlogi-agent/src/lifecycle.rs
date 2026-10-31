@@ -484,9 +484,18 @@ impl Running {
                 inventories,
                 standalone,
                 hid_open_failures,
+                confirms_volatile_settings,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
-                orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                if confirms_volatile_settings {
+                    orchestrator.refresh_inventory_for_settings_confirmation(
+                        &inventories,
+                        &standalone,
+                        hid_open_failures,
+                    );
+                } else {
+                    orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                }
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 let alerts = orchestrator.presenter_low_battery_alerts();
                 drop(orchestrator);
@@ -513,10 +522,7 @@ impl Running {
             // Devices likely power-cycled during the sleep; the next snapshot
             // re-applies their volatile settings (#189).
             InventoryEvent::SystemWake => {
-                self.orchestrator
-                    .lock()
-                    .await
-                    .reapply_volatile_on_next_refresh();
+                self.orchestrator.lock().await.reapply_after_system_resume();
             }
             InventoryEvent::BacklightChanged {
                 device_index: _,
