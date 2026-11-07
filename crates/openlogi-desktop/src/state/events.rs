@@ -59,6 +59,8 @@ pub(crate) enum StateEvent {
     ReportRateChanged(DeviceKey),
     /// The mouse's pointer-speed read landed or changed.
     PointerSpeedChanged(DeviceKey),
+    /// The headset's sidetone read landed or changed.
+    SidetoneChanged(DeviceKey),
     /// The device's press-force read landed or changed.
     ForceSensingChanged(DeviceKey),
     /// The keyboard's backlight read landed or changed.
@@ -67,6 +69,8 @@ pub(crate) enum StateEvent {
     EasySwitchChanged(DeviceKey),
     /// Disable Keys data, write, or persistence recovery changed.
     DisableKeysChanged(DeviceKey),
+    /// The onboard-memory read changed.
+    OnboardChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -84,6 +88,8 @@ pub(crate) enum StateEvent {
     DeviceConfigChanged(DeviceKey),
     /// Application-wide preferences changed.
     SettingsChanged,
+    /// The `[flow]` configuration or a peer's link state changed.
+    FlowChanged,
     /// The interface language switched live. Views re-render localized strings
     /// on the accompanying refresh; this event is for localized text *cached
     /// in state*, which must be recomputed in the new locale.
@@ -102,10 +108,12 @@ impl StateEvent {
             | Self::FnLockChanged(key)
             | Self::ReportRateChanged(key)
             | Self::PointerSpeedChanged(key)
+            | Self::SidetoneChanged(key)
             | Self::ForceSensingChanged(key)
             | Self::BacklightChanged(key)
             | Self::EasySwitchChanged(key)
             | Self::DisableKeysChanged(key)
+            | Self::OnboardChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -117,6 +125,7 @@ impl StateEvent {
             | Self::CameraChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
+            | Self::FlowChanged
             | Self::LanguageChanged => None,
         }
     }
@@ -255,15 +264,18 @@ impl AppState {
             | StateEvent::FnLockChanged(_)
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::SidetoneChanged(_)
             | StateEvent::ForceSensingChanged(_)
             | StateEvent::BacklightChanged(_)
             | StateEvent::EasySwitchChanged(_)
             | StateEvent::DisableKeysChanged(_)
+            | StateEvent::OnboardChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged
             | StateEvent::DeviceConfigChanged(_)
             | StateEvent::SettingsChanged
+            | StateEvent::FlowChanged
             | StateEvent::LanguageChanged => {
                 topic(event) && event.device().is_none_or(|key| self.is_current_device(key))
             }

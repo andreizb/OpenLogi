@@ -8,10 +8,11 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use hidpp::feature::CreatableFeature as _;
-use hidpp::feature::hires_wheel::HiResWheelFeature;
+use hidpp::feature::hires_wheel::{HiResWheelFeature, WheelResolution};
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
+use super::gesture::SpyRestore;
 use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
@@ -70,6 +71,10 @@ pub(crate) struct ArmedReporting {
     pub(crate) cid: u16,
     pub(crate) original: reprog_controls::CidReporting,
     policy: ReprogRestorePolicy,
+    /// Hand back the diversion found at arming instead of clearing it: the
+    /// host kernel diverted this control and listens to it, see
+    /// [`ArmedReporting::kernel_diversion_on`].
+    restore_as_found: bool,
 }
 
 /// How a capture session diverts one pointer control: what the firmware
@@ -107,6 +112,7 @@ impl ArmedReporting {
             cid,
             original,
             policy: ReprogRestorePolicy::Pointer(divert),
+            restore_as_found: false,
         }
     }
 
@@ -117,6 +123,7 @@ impl ArmedReporting {
             cid,
             original,
             policy: ReprogRestorePolicy::Keyboard,
+            restore_as_found: false,
         }
     }
 
@@ -129,8 +136,39 @@ impl ArmedReporting {
         }
     }
 
+    /// Keep a diversion found at arming when the restore writes through
+    /// `route` and the host kernel owns the control there. Linux 7.3+
+    /// `hid-logitech-hidpp` diverts the Bluetooth Signature M650's
+    /// Back/Forward at connect and maps the diverted reports to
+    /// `BTN_BACK`/`BTN_FORWARD`, because the native reports have broken
+    /// timing. Clearing that diversion would undo the kernel's fix until the
+    /// mouse reconnects. Elsewhere a found diversion is a leftover with no
+    /// listener, so [`Self::undivert_change`] still clears it.
+    ///
+    /// `route` is the route the restore writes through, not the one capture
+    /// armed on: a handoff restores through the device's new route, where the
+    /// kernel may not listen. Keyboard keys are never the kernel's.
+    pub(crate) fn kernel_diversion_on(self, route: &DeviceRoute) -> Self {
+        Self {
+            restore_as_found: self.original.diverted
+                && matches!(self.policy, ReprogRestorePolicy::Pointer(_))
+                && kernel_diverts(route, self.cid),
+            ..self
+        }
+    }
+
     /// Compute the `setCidReporting` change that restores this control.
     pub(crate) fn undivert_change(self) -> reprog_controls::CidReportingChange {
+        if self.restore_as_found {
+            return reprog_controls::CidReportingChange {
+                diverted: Some(true),
+                raw_xy: Some(self.original.raw_xy),
+                raw_wheel: (self.policy == ReprogRestorePolicy::Pointer(PointerDivert::RawWheel))
+                    .then_some(self.original.raw_wheel),
+                remap: self.original.remap,
+                ..Default::default()
+            };
+        }
         match self.policy {
             ReprogRestorePolicy::Pointer(PointerDivert::Plain | PointerDivert::RawXy) => {
                 undivert_change(self.original)
@@ -161,6 +199,20 @@ impl ArmedReporting {
         };
         (!holds(change, current)).then_some(change)
     }
+}
+
+/// Whether the host kernel diverts `cid` on `route` itself and turns its
+/// diverted reports into input events: the Bluetooth Signature M650's
+/// Back/Forward under `HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS` (Linux 7.3+).
+fn kernel_diverts(route: &DeviceRoute, cid: u16) -> bool {
+    cfg!(target_os = "linux")
+        && *route
+            == (DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb02a,
+            })
+        // The classic Back/Forward CIDs, the first of each family.
+        && [reprog_controls::BACK_CIDS[0], reprog_controls::FORWARD_CIDS[0]].contains(&cid)
 }
 
 /// Whether `current` already has every flag that `change` writes. The remap
@@ -244,11 +296,16 @@ impl ThumbwheelRestore {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HiResWheelRestore {
     feature_index: u8,
+    /// The native resolution to put back, when the divert changed it.
+    resolution: Option<WheelResolution>,
 }
 
 impl HiResWheelRestore {
-    pub(crate) fn new(feature_index: u8) -> Self {
-        Self { feature_index }
+    pub(crate) fn new(feature_index: u8, resolution: Option<WheelResolution>) -> Self {
+        Self {
+            feature_index,
+            resolution,
+        }
     }
 }
 
@@ -273,6 +330,7 @@ pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
     thumb: Option<ThumbwheelRestore>,
     main_wheel: Option<HiResWheelRestore>,
+    spy: Option<SpyRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -284,6 +342,7 @@ impl fmt::Debug for CaptureRestorePlan {
             )
             .field("has_thumbwheel", &self.thumb.is_some())
             .field("has_main_wheel", &self.main_wheel.is_some())
+            .field("host_mode", &self.spy.is_some())
             .finish()
     }
 }
@@ -299,7 +358,12 @@ impl RestorePlan for CaptureRestorePlan {
             for &item in &reprog.items {
                 restored &= match item {
                     ReprogRestoreItem::Reporting(reporting) => {
-                        restore_reporting(&controls, reporting, "captured control").await
+                        restore_reporting(
+                            &controls,
+                            reporting.kernel_diversion_on(current.route()),
+                            "captured control",
+                        )
+                        .await
                     }
                     ReprogRestoreItem::Undivert(cid) => {
                         restore_result(controls.undivert_cid(cid).await, "presenter hold control")
@@ -310,11 +374,17 @@ impl RestorePlan for CaptureRestorePlan {
         if let Some(wheel) = self.main_wheel {
             let feature =
                 HiResWheelFeature::new(channel.clone(), device_index, wheel.feature_index);
-            restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
+            restored &= restore_result(
+                main_wheel::undivert(&feature, wheel.resolution).await,
+                "main wheel",
+            );
         }
         if let Some(thumb) = self.thumb {
-            let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, thumb.feature_index);
             restored &= restore_result(thumbwheel.restore(thumb.status).await, "thumb wheel");
+        }
+        if let Some(spy) = &self.spy {
+            restored &= spy.restore_on(&channel, device_index).await;
         }
         restored
     }
@@ -341,19 +411,21 @@ impl PendingCaptureRestore {
                 reprog: None,
                 thumb: None,
                 main_wheel: None,
+                spy: None,
             },
         )
     }
 
-    /// The restore owed for `reprog` and the two wheels, or `None` when the
-    /// session diverted nothing.
+    /// The restore owed for `reprog`, the two wheels and host mode, or `None`
+    /// when the session diverted nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb: Option<ThumbwheelRestore>,
         main_wheel: Option<HiResWheelRestore>,
+        spy: Option<SpyRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() {
+        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() && spy.is_none() {
             return None;
         }
         Some(Self::owing(
@@ -362,6 +434,7 @@ impl PendingCaptureRestore {
                 reprog,
                 thumb,
                 main_wheel,
+                spy,
             },
         ))
     }

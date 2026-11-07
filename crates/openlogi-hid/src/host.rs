@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{
-    FnLockState, LightCommand, PairingError, PresenterPointerSpeed, WriteError,
+    FnLockState, LightCommand, OnboardState, PairingError, PresenterPointerSpeed, WriteError,
 };
 
 use crate::probe_cache::FileProbeCacheStore;
@@ -22,15 +22,17 @@ use openlogi_core::hid::smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque,
 };
 use openlogi_device::ChannelPool;
-use openlogi_device::LightWatch;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::{BacklightChange, BacklightState};
+use openlogi_device::inventory::hid_only::HidOnlyProduct;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    SidetoneLevel,
 };
+use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
 /// This host's HID stack.
@@ -84,6 +86,20 @@ pub async fn set_presenter_pointer_speed(
     speed: PresenterPointerSpeed,
 ) -> Result<(), WriteError> {
     device::set_presenter_pointer_speed(&*native_backend(), route, speed).await
+}
+
+/// Read the sidetone level of the headset `route` reaches.
+pub async fn get_sidetone(route: &DeviceRoute) -> Result<SidetoneLevel, WriteError> {
+    device::get_sidetone(&*native_backend(), route).await
+}
+
+/// Write a sidetone level to the headset `route` reaches and return the
+/// level it confirms.
+pub async fn set_sidetone(
+    route: &DeviceRoute,
+    level: SidetoneLevel,
+) -> Result<SidetoneLevel, WriteError> {
+    device::set_sidetone(&*native_backend(), route, level).await
 }
 
 /// Read the pointer-motion scaling of the device `route` reaches.
@@ -159,6 +175,17 @@ pub async fn set_scroll_wheel_mode(
     inverted: bool,
 ) -> Result<ScrollWheelMode, WriteError> {
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
+}
+
+/// Read the onboard memory of the device on `route`.
+pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError> {
+    device::get_onboard(&*native_backend(), route).await
+}
+
+/// Read the HID++ `0x8110` slot mapping of the mouse `route` reaches and
+/// start its button spy, unless the mouse is in host mode.
+pub async fn watch_button_spy(route: &DeviceRoute) -> Result<ButtonSpyWatch, ButtonSpyError> {
+    device::watch_button_spy(&*native_backend(), route).await
 }
 
 /// Read the Fn-lock state of the keyboard `route` reaches.
@@ -312,6 +339,11 @@ pub fn channel_pool() -> ChannelPool {
 /// Enumerate this host's recognized standalone devices.
 pub async fn enumerate_standalone() -> Result<Vec<StandaloneDevice>, InventoryError> {
     openlogi_device::inventory::standalone::enumerate_standalone(&*native_backend()).await
+}
+
+/// List the Logitech products this host shows while it offers no HID++ node.
+pub async fn enumerate_hid_only() -> Result<Vec<HidOnlyProduct>, InventoryError> {
+    openlogi_device::inventory::hid_only::enumerate_hid_only(&*native_backend()).await
 }
 
 /// Subscribe to this host's HID hotplug events.

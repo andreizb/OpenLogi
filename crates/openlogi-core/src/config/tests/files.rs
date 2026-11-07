@@ -3,48 +3,51 @@
 use super::*;
 
 #[test]
-fn spotlight_v9_settings_survive_migration_with_a_recovery_copy() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("config.toml");
-    let key = "unit:01020304";
-    let mut previous = Config {
-        schema_version: 9,
-        ..Config::default()
-    };
-    previous.set_presenter(
-        key,
-        crate::hid::PresenterSettings {
-            effect: crate::hid::PresenterEffect::Magnify,
-            magnification: 275,
-            ..crate::hid::PresenterSettings::default()
-        },
-    );
-    previous.set_per_app_presenter(
-        key,
-        "com.example.slides",
-        Some(crate::hid::PresenterSettings {
-            effect: crate::hid::PresenterEffect::DigitalLaser,
-            ..crate::hid::PresenterSettings::default()
-        }),
-    );
-    previous.set_binding(
-        key,
-        ButtonId::PresenterNextHold,
-        Binding::Single(Action::PresenterStartPresentation),
-    );
-    let original = toml::to_string_pretty(&previous).expect("serialize old config");
-    fs::write(&path, &original).expect("write v9 config");
+fn spotlight_settings_survive_schema_upgrades_with_a_recovery_copy() {
+    for version in [9, 10] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let key = "unit:01020304";
+        let mut previous = Config {
+            schema_version: version,
+            ..Config::default()
+        };
+        previous.set_presenter(
+            key,
+            crate::hid::PresenterSettings {
+                effect: crate::hid::PresenterEffect::Magnify,
+                magnification: 275,
+                ..crate::hid::PresenterSettings::default()
+            },
+        );
+        previous.set_per_app_presenter(
+            key,
+            "com.example.slides",
+            Some(crate::hid::PresenterSettings {
+                effect: crate::hid::PresenterEffect::DigitalLaser,
+                ..crate::hid::PresenterSettings::default()
+            }),
+        );
+        previous.set_binding(
+            key,
+            ButtonId::PresenterNextHold,
+            Binding::Single(Action::PresenterStartPresentation),
+        );
+        let original = toml::to_string_pretty(&previous).expect("serialize old config");
+        fs::write(&path, &original).expect("write old config");
 
-    let (migrated, mut tracked) = ConfigFile::load_from_path(&path).expect("load v9 config");
-    assert_eq!(migrated.schema_version, SCHEMA_VERSION);
-    assert_eq!(migrated.devices, previous.devices);
-    tracked.save(&migrated).expect("save migrated config");
-    assert_eq!(
-        fs::read_to_string(dir.path().join("config.toml.v9.bak")).expect("read v9 recovery copy"),
-        original
-    );
-    let reloaded = Config::load_from_path(&path).expect("reload migrated config");
-    assert_eq!(reloaded.devices, previous.devices);
+        let (migrated, mut tracked) = ConfigFile::load_from_path(&path).expect("load old config");
+        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
+        assert_eq!(migrated.devices, previous.devices);
+        tracked.save(&migrated).expect("save migrated config");
+        assert_eq!(
+            fs::read_to_string(dir.path().join(format!("config.toml.v{version}.bak")))
+                .expect("read recovery copy"),
+            original
+        );
+        let reloaded = Config::load_from_path(&path).expect("reload migrated config");
+        assert_eq!(reloaded.devices, previous.devices);
+    }
 }
 
 #[test]
@@ -58,6 +61,19 @@ fn canonical_configuration_example_parses() {
     };
     assert_eq!(long_press.short(), &Action::ShowDesktop);
     assert_eq!(long_press.long(), &Action::MissionControl);
+    assert_eq!(
+        config
+            .momentum_scrolling("receiver:aabbccdd:slot:1")
+            .glide_ms,
+        600,
+        "the documented device override wins"
+    );
+    assert!(
+        config
+            .momentum_scrolling("receiver:aabbccdd:slot:2")
+            .enabled,
+        "a device without one follows the documented app-wide table"
+    );
 }
 
 #[test]

@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
-    popover::PopoverState, v_flex,
+    popover::PopoverState, scroll::ScrollableElement, v_flex,
 };
 use openlogi_core::binding::{Action, ApplicationTarget, ButtonId, Category, GestureDirection};
 
@@ -86,11 +86,11 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::NewTab => "action-icons/square-plus.svg",
         Action::CloseTab => "action-icons/square-x.svg",
         Action::ReopenTab => "action-icons/rotate-ccw.svg",
-        Action::NextTab => "action-icons/chevron-right.svg",
-        Action::PrevTab => "action-icons/chevron-left.svg",
+        Action::NextTab | Action::NextKeypadPage => "action-icons/chevron-right.svg",
+        Action::PrevTab | Action::PreviousKeypadPage => "action-icons/chevron-left.svg",
         Action::ReloadPage => "action-icons/rotate-cw.svg",
         Action::MissionControl | Action::ShowActionsRing => "action-icons/layout-grid.svg",
-        Action::AppExpose => "action-icons/layers.svg",
+        Action::AppExpose | Action::GShift => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
         Action::ShowDesktop | Action::PresenterBlankScreen => "action-icons/monitor.svg",
@@ -108,12 +108,13 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::VolumeUp | Action::PresenterVolume => "action-icons/volume-2.svg",
         Action::VolumeDown => "action-icons/volume-1.svg",
         Action::MuteVolume => "action-icons/volume-x.svg",
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::TogglePrecisionMode => {
-            "action-icons/gauge.svg"
-        }
+        Action::CycleDpiPresets
+        | Action::SetDpiPreset(_)
+        | Action::TogglePrecisionMode
+        | Action::DpiShift => "action-icons/gauge.svg",
         Action::ToggleSmartShift | Action::PresenterRecenter => "action-icons/refresh-cw.svg",
-        Action::ScrollUp => "action-icons/chevrons-up.svg",
-        Action::ScrollDown => "action-icons/chevrons-down.svg",
+        Action::ScrollUp | Action::NextDpiPreset => "action-icons/chevrons-up.svg",
+        Action::ScrollDown | Action::PreviousDpiPreset => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
         Action::PresenterHighlight => "action-icons/star.svg",
@@ -145,10 +146,43 @@ pub(crate) fn action_rows_matching(
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
+    action_rows_with(
+        id_prefix,
+        current,
+        query,
+        ActionOffer::default(),
+        on_pick,
+        pal,
+    )
+}
+
+/// What a picker offers beyond the catalog, and what of it it leaves out.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ActionOffer<'a> {
+    pub extra: &'a [Action],
+    pub hidden: &'a [Action],
+}
+
+pub(crate) fn action_rows_with(
+    id_prefix: &'static str,
+    current: Option<&Action>,
+    query: &str,
+    offer: ActionOffer<'_>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> Vec<gpui::Div> {
     let query = query.trim().to_lowercase();
     let mut catalog_index = 0usize;
     let mut sections = Vec::new();
-    for (category, actions) in grouped_catalog() {
+    for (category, mut actions) in grouped_catalog() {
+        actions.extend(
+            offer
+                .extra
+                .iter()
+                .filter(|a| a.category() == category)
+                .cloned(),
+        );
+        actions.retain(|action| !offer.hidden.contains(action));
         let category_label = rust_i18n::t!(category.translation_key());
         let category_matches = category_label.to_lowercase().contains(&query);
         // Number the full catalog before filtering so typing in the search box
@@ -291,16 +325,23 @@ pub(crate) fn divider(pal: Palette) -> impl IntoElement {
     div().mb_1().h(px(1.)).w_full().bg(pal.border)
 }
 
-/// Height-capped scroll region for compact editor rows.
+/// Height-capped scroll region for compact editor rows, with the app's
+/// scrollbar so a list taller than the cap shows that it scrolls.
+///
+/// The cap sits on a wrapper, not on the scrolled element:
+/// [`ScrollableElement::overflow_y_scrollbar`] keeps that element as the
+/// scrolled content, so a `max_h` on it would clamp the content to the
+/// viewport and leave nothing to scroll.
 pub(crate) fn editor_scroll_list(
     id: &'static str,
     rows: impl IntoIterator<Item = impl IntoElement>,
 ) -> impl IntoElement {
-    div()
-        .id(id)
-        .max_h(px(EDITOR_LIST_MAX_H))
-        .overflow_y_scroll()
-        .children(rows)
+    v_flex().max_h(px(EDITOR_LIST_MAX_H)).child(div()
+            .overflow_y_scrollbar()
+            // Every list shares this call site, which is the default
+            // scroll-state key; the caller's id keeps each list's position.
+            .id(id)
+            .children(rows))
 }
 
 /// A single-field "Open Application or Folder" editor, matching the Action
@@ -410,7 +451,7 @@ fn add_field_editor(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-{field}-error"))
                     .text_caption()
-                    .text_color(rgb(0x00ef_4444))
+                    .text_color(pal.text_danger)
                     .child(tr!("action_ring.custom_action_invalid_input")),
             )
         })
